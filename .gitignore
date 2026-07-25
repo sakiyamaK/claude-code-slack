@@ -1,0 +1,11 @@
+# トークンを含むので絶対にコミットしない
+config.yml
+config.yaml
+.env
+
+# ランタイム
+.venv/
+__pycache__/
+*.pyc
+*.sqlite3
+relay_registry.sqlite3

@@ -1,0 +1,55 @@
+# これを config.yml にコピーして値を埋める:  cp config.sample.yml config.yml
+# config.yml は git にコミットしない（トークンを含むため）。配布は config.sample.yml のみ。
+
+slack:
+  # api.slack.com で取得（チャットに貼らない）
+  bot_token: "xoxb-..."
+  app_token: "xapp-..."
+
+security:
+  # 起動を許可する Slack ユーザーID（本人のみ推奨。空=全員許可で危険）
+  # 取得: Slackで自分のプロフィール →「メンバーIDをコピー」（U から始まる）
+  allowed_user_ids: ["U000000000"]
+  # 反応を許可する DM/チャンネルID（空なら全許可）
+  allowed_channel_ids: []
+  # yolo(bypassPermissions) を /mode で選べるようにするか（横展開の既定は false 推奨）
+  allow_bypass: false
+
+paths:
+  # 対象リポジトリ
+  target_repo: "<プロジェクトのフルパス>"
+  # タスク worktree を作る親（＝target_repo の1つ上。空でも同じ）
+  worktree_parent: ""
+  # 普通モードの作業ディレクトリ（＝target_repo の1つ上。空でも同じ）
+  workspace_dir: ""
+
+# behavior は任意（既定: task_keywords=作業/タスク/task, max_concurrent=2,
+#   default_model=opus, default_permission_mode=acceptEdits,
+#   manager_permission_mode=acceptEdits）。変えたい時だけ書く。
+behavior:
+  # マネージャーを無人で回すなら全許可。acceptEdits だと .claude 編集等で毎回停止する。
+  # 全許可は manager.agent.md の安全ルール(rm -rf/push --force 等禁止)＋worktree隔離が前提。
+  manager_permission_mode: "bypassPermissions"
+  # task_keywords: ["作業", "タスク", "task"]
+  # default_model: "opus"
+
+# プロジェクト固有コマンド（/<name>）。組み込みは /model /mode /commit /push のみ。
+# プレースホルダ: {branch}=スレッドのタスク, {version}=バージョン記法の解決結果, {arg}=生の引数
+# version: true にすると引数を X.X.X+1 記法として解釈し {version} に入れる。
+# 例（iOS 配信）。他プロジェクトは自由に定義（例: /deploy など）:
+# commands:
+#   firebase:
+#     version: true
+#     confirm: "branch {branch} を v{version} で Firebase に上げます。"
+#     prompt: "{branch} の worktree で deliver スキルを使い、バージョン {version} で Firebase App Distribution へ配信して。"
+#   testflight:
+#     version: true
+#     confirm: "branch {branch} を v{version} で TestFlight に上げます。"
+#     prompt: "{branch} の worktree で deliver スキルを使い、バージョン {version} で TestFlight へ配信して。"
+
+bin:
+  claude: "claude"
+  cmux: "/Applications/cmux.app/Contents/Resources/bin/cmux"
+
+# レジストリDBの保存先
+registry_db: "./relay_registry.sqlite3"

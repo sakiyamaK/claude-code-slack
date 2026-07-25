@@ -1,0 +1,32 @@
+# Slack アプリ作成用マニフェスト（From a manifest に貼る）
+# これで scope / message.im / App Home の送信許可 / Socket Mode まで一括設定される。
+# ※ App-Level Token（xapp-）だけは別途 Basic Information → App-Level Tokens で生成する。
+display_information:
+  name: claude-relay
+  description: Slack から自分の Mac の Claude Code / tcmtasks を動かす中継
+features:
+  bot_user:
+    display_name: claude-relay
+    always_online: true
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - channels:history
+      - im:history
+      - reactions:write
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
