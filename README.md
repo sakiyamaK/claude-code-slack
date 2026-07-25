@@ -66,12 +66,13 @@ python3 -m venv .venv
 ```bash
 cp config.sample.yml config.yml   # 代表者配布のテンプレートがあればそれを config.yml に
 ```
-`config.yml` を開いて **自分ぶんの3か所** を埋める:
-- `slack.bot_token`（`xoxb-`）
-- `slack.app_token`（`xapp-`）
-- `security.allowed_user_ids`（自分のメンバーID。Slackの自分のプロフィール →「メンバーIDをコピー」）
+`config.yml` を開いて必須項目を埋める:
+- `paths.target_repo` … 対象プロジェクトのフルパス
+- `slack.bot_token` … `xoxb-` トークン
+- `slack.app_token` … `xapp-` トークン
+- `security.allowed_user_ids` … 自分の Slack メンバーID（`U…`）
 
-（テンプレートが無い/個人利用なら `paths.target_repo` も自分で対象プロジェクトに）
+> 代表者配布のテンプレートがあれば `paths.target_repo` は記入済み。トークン2つと自分のIDだけ足す。
 
 ### 4. 起動する
 ```bash
