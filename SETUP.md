@@ -39,6 +39,7 @@ task:
         # - kind: command             #   command: 任意のシェルコマンド
         #   command: "my-agents add '{task}'"
       watch: ".agents/progress.md"    # relay が監視。AI が中身を読んで完了/停滞/要判断を通知
+      watch_manager: true             # 任意。マネージャー端末の直接返答も AI で拾う（既定 false）
 ```
 
 **契約はこれだけ**: 「start を受けて動き、進捗をどこかのファイルに書く」。
@@ -46,8 +47,16 @@ task:
 「どのタスクが 完了 / 停滞 / 要判断 か」を解釈させてスレッドへ通知する。
 **決まった書式も相関タグも不要**（AI が内容でスレッドに紐付ける）。
 
+**タスクスレッドの継続**: `作業:` で始めたスレッドは、以降のやりとり（追加指示・質問）も
+自動でそのタスク宛としてマネージャーへ届く。普通モードに落ちない。
+
+**`watch_manager`（任意）**: マネージャーが「エージェントを立てるほどでない」と判断して
+端末で**直接返事**した場合、それは進捗ファイルには出ない。ON にすると relay が
+マネージャー端末の出力も同じ AI 解釈にかけ、その返事を該当スレッドへ返す。
+相手が cmux 上の対話 claude なら**プロジェクト側の改修は不要**。非同期（監視間隔ごと・数十秒遅延）。
+
 - プレースホルダ: `{task}`=依頼内容, `{id}`=スレッド識別子
-- コスト: 進捗ファイルが変わるたびに解釈 LLM（安価なモデル）を1回。変化検知で無駄打ちは抑制
+- コスト: 進捗ファイル/端末が変わるたびに解釈 LLM（安価なモデル）を1回。変化検知で無駄打ちは抑制
 
 ---
 
@@ -82,6 +91,7 @@ task:
 | `task.backend` | タスク実行方式（`solo` or `backends` のキー） | solo |
 | `task.solo.worktree` | solo でタスクごとに worktree を切る | true |
 | `task.backends` | 自作 backend 定義（`start` フック＋`watch` 進捗ファイル） | 無 |
+| `task.backends.<name>.watch_manager` | マネージャー端末の直接返答も AI 解釈して返す | false |
 | `behavior.manager_permission_mode` | 自作 backend マネージャーの権限（無人運用は `bypassPermissions`） | acceptEdits |
 | `behavior.task_keywords` | タスク発火語 | 作業,タスク,task |
 | `behavior.max_concurrent` | 普通モード/solo の同時実行 | 2 |
