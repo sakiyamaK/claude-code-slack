@@ -38,6 +38,7 @@ class ClaudeRunner:
         permission_mode: str,
         resume_session: str | None = None,
         append_system: str | None = NORMAL_SYSTEM_HINT,
+        add_dirs: list[str] | None = None,
     ) -> RunResult:
         cmd = [
             self.claude_bin, "-p", prompt,
@@ -45,6 +46,11 @@ class ClaudeRunner:
             "--model", model,
             "--permission-mode", permission_mode,
         ]
+        # cwd 外（兄弟 worktree 等）の編集を acceptEdits で自動承認させるため
+        # 追加の作業許可ディレクトリを渡す。無いと cwd 外は毎回承認要求→非対話で拒否。
+        for d in add_dirs or []:
+            if d:
+                cmd += ["--add-dir", d]
         if append_system:
             cmd += ["--append-system-prompt", append_system]
         if resume_session:

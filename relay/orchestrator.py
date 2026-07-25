@@ -125,6 +125,7 @@ class Orchestrator:
             text, self.cfg.workspace_dir,
             model=self.model, permission_mode=self.permission_mode,
             resume_session=session,
+            add_dirs=[self.cfg.worktree_parent],
         )
         if res.session_id:
             self.registry.update(thread_ts, session_id=res.session_id)
@@ -180,7 +181,8 @@ class Orchestrator:
         res = self.runner.run(
             body, cwd, model=self.model,
             permission_mode=self.cfg.manager_permission_mode,
-            resume_session=session, append_system=self._SOLO_HINT)
+            resume_session=session, append_system=self._SOLO_HINT,
+            add_dirs=[self.cfg.worktree_parent])
         if res.session_id:
             self.registry.update(thread_ts, session_id=res.session_id)
         head = "✅ 完了" if res.ok else "⚠️ 失敗"
