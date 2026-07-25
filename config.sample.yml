@@ -27,7 +27,8 @@ paths:
 #   solo = relay が claude を直接回す簡易実行。追加ツール不要でどこでも動く。
 #          タスクごとに worktree を切って隔離するので複数タスクを安全に並行できる。
 #   自作 = 自分のマルチエージェント/オーケストレーターを backends に差す。
-#          ライフサイクル = start（起動）→ watch（進捗ファイルを AI が解釈して通知）。
+#          ライフサイクル = start（起動）→ watch（進捗ファイルを AI が解釈して通知）
+#          ＋ watch_manager（マネージャー端末の直接返答も AI が拾って該当スレッドへ返す）。
 # task:
 #   # solo の調整（任意）
 #   solo:
@@ -47,7 +48,11 @@ paths:
 #         # - kind: command             #   command = 任意のシェルコマンド
 #         #   command: "my-agents add '{task}'"
 #       watch: ".agents/progress.md"    # relay が監視し、AI が中身を解釈して完了/停滞/要判断を通知
-#   # ※ 書式自由・相関タグ不要。AI が進捗ファイルを読んでタスクに紐付ける。
+#       watch_manager: true             # マネージャー端末の出力も AI 解釈（任意・既定 false）
+#         # 用途: エージェントを立てず「マネージャーが直接返した返事」を該当スレッドへ返す。
+#         # 進捗ファイル(watch)に出ない会話返答を拾う。相手が cmux 上の対話 claude なら
+#         # プロジェクト側の改修は不要。ON にすると監視間隔ごとに解釈が走る（非同期・数十秒遅延）。
+#   # ※ 書式自由・相関タグ不要。AI が進捗ファイルやマネージャー端末を読んでタスクに紐付ける。
 #   #   {task}=依頼内容, {id}=スレッド識別子
 
 # behavior は任意（既定: task_keywords=作業/タスク/task, max_concurrent=2,
