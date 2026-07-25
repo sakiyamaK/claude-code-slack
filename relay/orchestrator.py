@@ -21,7 +21,7 @@ from .registry import (
     Registry, Task, MODE_NORMAL, MODE_TASK,
     STATUS_ACTIVE, STATUS_DONE, now_iso,
 )
-from .runner import ClaudeRunner
+from .runner import ClaudeRunner, NORMAL_SYSTEM_HINT
 
 # Slack への投稿: (channel, thread_ts, text) -> None
 Poster = Callable[[str, str | None, str], None]
@@ -49,6 +49,7 @@ class Orchestrator:
         self._locks_guard = threading.Lock()
         self._pending_pick: dict[str, str] = {}  # thread_ts -> "model"|"mode"
         self._watch_hash: str | None = None                # 進捗ファイル変化検知
+        self._manager_hash: str | None = None              # マネージャー端末変化検知
         self._notified: dict[str, list[str]] = {}          # thread -> 通知済み要約
         # グローバル設定の初期化
         if self.registry.get_setting("model") is None:
@@ -95,7 +96,7 @@ class Orchestrator:
         if cmd.is_command:
             self._command(channel, thread_ts, cmd.name, cmd.arg)
             return
-        # 3) タスクモード
+        # 3) タスクモード開始（作業:）
         tp = parse_task_mode(text, self.cfg.task_keywords)
         if tp.is_task:
             if tp.empty_body:
@@ -103,8 +104,17 @@ class Orchestrator:
                 return
             self._task_mode(channel, user, thread_ts, tp.body)
             return
-        # 4) 自然言語 → 操作 or 普通モード
+        # 3.5) 既にタスクスレッドなら、以降のやりとりもタスクモードで継続
+        existing = self.registry.get(thread_ts)
         active = [t.branch for t in self.registry.active_tasks() if t.branch]
+        if existing and existing.mode == MODE_TASK:
+            it = intent_mod.classify(text, active)
+            if it.is_operation:
+                self._operation(channel, thread_ts, it, text)
+            else:
+                self._task_follow_up(channel, user, thread_ts, text)
+            return
+        # 4) 自然言語 → 操作 or 普通モード（タスク未紐付けのスレッド）
         it = intent_mod.classify(text, active)
         if it.is_operation:
             self._operation(channel, thread_ts, it, text)
@@ -112,6 +122,36 @@ class Orchestrator:
             self._normal_mode(channel, thread_ts, text)
 
     # ── 普通モード ─────────────────────────────────────
+    def _progress_files(self) -> list[str]:
+        """進捗の真実の在り処（config 由来）を絶対パスで集める。
+
+        - backend の watch ファイル（dashboard 等）
+        - backend の start ステップで書き込む file（todo 等）
+        推測ではなくこれらを読ませることで、status 質問の食い違いを防ぐ。
+        """
+        paths: list[str] = []
+        if self.cfg.watch_path:
+            paths.append(self.cfg.watch_path)
+        for step in (self.cfg.backend.get("start") or []):
+            if (step or {}).get("kind") == "file" and step.get("path"):
+                paths.append(os.path.join(self.cfg.target_repo, step["path"]))
+        # 重複除去（順序維持）
+        seen: set[str] = set()
+        return [p for p in paths if not (p in seen or seen.add(p))]
+
+    def _normal_hint(self) -> str:
+        files = self._progress_files()
+        if not files:
+            return NORMAL_SYSTEM_HINT
+        lst = "\n".join(f"  - {p}" for p in files)
+        return (
+            "あなたはSlack経由で話しかけられている。回答は簡潔に。\n"
+            "タスクの進捗・状況を聞かれたら、必ず次の進捗ファイルを実際に read してから答えること:\n"
+            f"{lst}\n"
+            "ファイルを読まずに『タスクはない』等と憶測で答えてはならない。"
+            "読めなかった・存在しなかった場合はその事実（どのパスが無かったか）をそのまま伝えること。"
+        )
+
     def _normal_mode(self, channel: str, thread_ts: str, text: str) -> None:
         task = self.registry.get(thread_ts)
         session = task.session_id if task else None
@@ -126,6 +166,7 @@ class Orchestrator:
             model=self.model, permission_mode=self.permission_mode,
             resume_session=session,
             add_dirs=[self.cfg.worktree_parent],
+            append_system=self._normal_hint(),
         )
         if res.session_id:
             self.registry.update(thread_ts, session_id=res.session_id)
@@ -187,6 +228,21 @@ class Orchestrator:
             self.registry.update(thread_ts, session_id=res.session_id)
         head = "✅ 完了" if res.ok else "⚠️ 失敗"
         self.post(channel, thread_ts, f"{head}\n\n{res.text[:3500]}")
+
+    def _task_follow_up(self, channel: str, user: str, thread_ts: str, text: str) -> None:
+        """タスクスレッドの2通目以降。solo=同一セッション継続 / backend=マネージャーに注入して返答を返す。"""
+        if self.cfg.is_solo:
+            self._solo_task(channel, user, thread_ts, text)
+            return
+        # backend: マネージャーへ注入。返答（直接返答 or エージェント起動→dashboard）は
+        # watch_manager / watch の AI 解釈で該当スレッドに戻る。
+        ref = self._task_ref(thread_ts)
+        ctx = f"（タスク「{ref}」について）" if ref else ""
+        surface = self._ensure_manager()
+        self.cmux.send(surface, f"{ctx}{text}")
+        # watch_manager が無い構成でだけ、最低限の受領 ack を出す（二重投稿回避）
+        if not self.cfg.watch_manager:
+            self.post(channel, thread_ts, "📨 マネージャーに伝えました。")
 
     def _backend_task(self, channel: str, user: str, thread_ts: str, body: str) -> None:
         """プロジェクトのオーケストレーターに委譲: start フックを実行して起動。"""
@@ -353,19 +409,47 @@ class Orchestrator:
     # ── 進捗監視（AI 解釈で通知） ───────────────────────
     def start_watcher(self, interval: int = 20) -> None:
         # solo は end=プロセス終了で結果を返すため監視不要。外部 backend のみ監視。
-        if self.cfg.is_solo or not self.cfg.watch_path:
+        if self.cfg.is_solo:
             return
-        threading.Thread(target=self._watch_loop, args=(interval,), daemon=True).start()
+        if self.cfg.watch_path:
+            threading.Thread(target=self._loop, args=(self._poll_watch, interval),
+                             daemon=True).start()
+        # マネージャー端末の直接返答も同じ AI 解釈で拾う（dashboard に出ない分）
+        if self.cfg.watch_manager:
+            threading.Thread(target=self._loop, args=(self._poll_manager, interval),
+                             daemon=True).start()
 
-    def _watch_loop(self, interval: int) -> None:
+    def _loop(self, fn: Callable[[], None], interval: int) -> None:
         while True:
             try:
-                self._poll_watch()
+                fn()
             except Exception:
                 pass
             time.sleep(interval)
 
+    def _active_task_list(self) -> list[dict]:
+        """追跡中の backend タスク（id=thread, task=依頼内容）。"""
+        tasks = []
+        for t in self.registry.active_tasks():
+            if t.mode != MODE_TASK:
+                continue
+            instr = self.registry.get_setting(f"instr:{t.thread_ts}", "")
+            tasks.append({"id": t.thread_ts, "task": instr or "(内容不明)"})
+        return tasks
+
+    def _interpret_and_notify(self, content: str) -> None:
+        """任意テキスト（進捗ファイル or マネージャー端末）を解釈してイベント通知。"""
+        tasks = self._active_task_list()
+        if not tasks:
+            return
+        events = interp_mod.interpret(   # 頻繁に呼ぶので安価なモデル
+            self.cfg.claude_bin, "haiku", self.cfg.target_repo,
+            content, tasks, self._notified)
+        for e in events:
+            self._notify_ai_event(e)
+
     def _poll_watch(self) -> None:
+        """進捗ファイル（dashboard 等）を解釈。"""
         path = self.cfg.watch_path
         if not path or not os.path.exists(path):
             return
@@ -375,23 +459,21 @@ class Orchestrator:
         if h == self._watch_hash:
             return  # 変化なし → LLM を呼ばない（デバウンス）
         self._watch_hash = h
+        self._interpret_and_notify(content)
 
-        # 追跡中の backend タスク（id=thread, task=依頼内容）
-        tasks = []
-        for t in self.registry.active_tasks():
-            if t.mode != MODE_TASK:
-                continue
-            instr = self.registry.get_setting(f"instr:{t.thread_ts}", "")
-            tasks.append({"id": t.thread_ts, "task": instr or "(内容不明)"})
-        if not tasks:
+    def _poll_manager(self) -> None:
+        """マネージャー端末の出力を解釈（エージェントを立てず直接返した返事を拾う）。"""
+        surface = self.registry.get_setting("manager_surface")
+        if not surface or not self.cmux.surface_exists(surface):
             return
-
-        # 解釈は安価なモデルで（頻繁に呼ぶため）
-        events = interp_mod.interpret(
-            self.cfg.claude_bin, "haiku", self.cfg.target_repo,
-            content, tasks, self._notified)
-        for e in events:
-            self._notify_ai_event(e)
+        content = self.cmux.read_screen(surface, 200)
+        if not content.strip():
+            return
+        h = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if h == self._manager_hash:
+            return  # 画面変化なし → デバウンス
+        self._manager_hash = h
+        self._interpret_and_notify(content)
 
     def _notify_ai_event(self, e: interp_mod.InterpEvent) -> None:
         # 重複排除（同一スレッドで同じ要約は送らない）

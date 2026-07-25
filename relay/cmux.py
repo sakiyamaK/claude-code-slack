@@ -142,3 +142,10 @@ class CmuxClient:
             raise RuntimeError(f"cmux send 失敗: {r.stderr.strip() or r.stdout.strip()}")
         time.sleep(0.3)
         self._run("send-key", "--surface", surface, "enter")
+
+    def read_screen(self, surface: str, lines: int = 200) -> str:
+        """端末サーフェスの可視出力を読む（catch-up・状態確認・AI 解釈の入力）。"""
+        try:
+            return self._run("read-screen", "--surface", surface, "--lines", str(lines)).stdout or ""
+        except Exception:
+            return ""

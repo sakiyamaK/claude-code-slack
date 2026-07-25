@@ -91,6 +91,16 @@ class Config:
         p = self.backend.get("watch")
         return os.path.join(self.target_repo, p) if p else ""
 
+    @property
+    def watch_manager(self) -> bool:
+        """マネージャー端末の出力も AI 解釈して直接の返事を返すか（backend 設定）。
+
+        dashboard(watch) が「進捗ファイルの解釈」なのに対し、こちらは
+        「マネージャーが端末で社長に直接言ったこと」を拾う。相手が cmux で動く
+        対話 claude でありさえすればよく、プロジェクト固有の作法を要求しない。
+        """
+        return _as_bool(self.backend.get("watch_manager", False))
+
     @staticmethod
     def load() -> "Config":
         y = _load_yaml()
