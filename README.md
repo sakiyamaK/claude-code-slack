@@ -42,6 +42,9 @@ Slack から、自分の Mac の Claude Code を動かす。
 
 > ⚠️ **最初に確認**: 1人1つ Slack アプリを作ります。ワークスペースがアプリ作成を制限していることがあるので、**作れるか先に確認**（ダメなら管理者に依頼）。
 
+> 💡 **楽な道**: このフォルダを Claude Code で開いて「セットアップして」でもOK（機械的な準備は Claude が実行、Slack アプリ作成だけ手動）。
+> 自分でやるなら `bash setup.sh`（venv＋依存＋config.yml）→ config.yml 記入 → `bash run.sh`。以下はその詳細。
+
 ### 0. 前提（入っているか確認するだけ）
 - macOS＋Python 3
 - `claude` CLI（ログイン済み） … `claude --version` が通る
