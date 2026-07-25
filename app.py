@@ -111,7 +111,7 @@ def _catch_up() -> None:
 
 
 def main() -> None:
-    print("[slack-relay] Socket Mode 起動")
+    print("[claude-code-slack] Socket Mode 起動")
     print(f"  target_repo    = {cfg.target_repo}")
     print(f"  workspace_dir  = {cfg.workspace_dir}")
     print(f"  max_concurrent = {cfg.max_concurrent}")

@@ -12,7 +12,7 @@ security:
   allowed_user_ids: ["U000000000"]
   # 反応を許可する DM/チャンネルID（空なら全許可）
   allowed_channel_ids: []
-  # yolo(bypassPermissions) を /mode で選べるようにするか（横展開の既定は false 推奨）
+  # yolo(bypassPermissions) を /mode で選べるようにするか（既定 false 推奨）
   allow_bypass: false
 
 paths:
@@ -23,33 +23,58 @@ paths:
   # 普通モードの作業ディレクトリ（＝target_repo の1つ上。空でも同じ）
   workspace_dir: ""
 
+# タスクの実行方式。未指定なら solo。
+#   solo = relay が claude を直接回す簡易実行。追加ツール不要でどこでも動く。
+#          タスクごとに worktree を切って隔離するので複数タスクを安全に並行できる。
+#   自作 = 自分のマルチエージェント/オーケストレーターを backends に差す。
+#          ライフサイクル = start（起動）→ watch（進捗ファイルを AI が解釈して通知）。
+# task:
+#   # solo の調整（任意）
+#   solo:
+#     worktree: true        # タスクごとに worktree を切る（既定 true）
+#     base: ""              # worktree のベース ref（空=現在ブランチ）
+#
+#   # 自作 backend を使う場合:
+#   backend: my-agents
+#   backends:
+#     my-agents:
+#       start:                          # タスク開始時に順に実行するフック
+#         - kind: inject                #   inject = マネージャー(claude)にプロンプト注入
+#           prompt: "新規タスク {id}: {task}"
+#         # - kind: file                #   file = ファイルにタスクを書く
+#         #   path: ".agents/todo.md"
+#         #   template: "{task}\n"
+#         # - kind: command             #   command = 任意のシェルコマンド
+#         #   command: "my-agents add '{task}'"
+#       watch: ".agents/progress.md"    # relay が監視し、AI が中身を解釈して完了/停滞/要判断を通知
+#   # ※ 書式自由・相関タグ不要。AI が進捗ファイルを読んでタスクに紐付ける。
+#   #   {task}=依頼内容, {id}=スレッド識別子
+
 # behavior は任意（既定: task_keywords=作業/タスク/task, max_concurrent=2,
-#   default_model=opus, default_permission_mode=acceptEdits,
-#   manager_permission_mode=acceptEdits）。変えたい時だけ書く。
+#   default_model=opus, default_permission_mode=acceptEdits, manager_permission_mode=acceptEdits）
 behavior:
-  # マネージャーを無人で回すなら全許可。acceptEdits だと .claude 編集等で毎回停止する。
-  # 全許可は manager.agent.md の安全ルール(rm -rf/push --force 等禁止)＋worktree隔離が前提。
-  manager_permission_mode: "bypassPermissions"
+  # 自作 backend のマネージャーを無人で回すなら全許可。acceptEdits だと確認で止まる場合がある。
+  manager_permission_mode: "acceptEdits"
   # task_keywords: ["作業", "タスク", "task"]
   # default_model: "opus"
 
-# プロジェクト固有コマンド（/<name>）。組み込みは /model /mode /commit /push のみ。
-# プレースホルダ: {branch}=スレッドのタスク, {version}=バージョン記法の解決結果, {arg}=生の引数
+# ユーザー定義コマンド（/<name>）。組み込みは /model /mode /commit /push のみ。
+# プレースホルダ: {task}=スレッドのタスク参照, {version}=バージョン記法の解決結果, {arg}=生の引数
 # version: true にすると引数を X.X.X+1 記法として解釈し {version} に入れる。
-# 例（iOS 配信）。他プロジェクトは自由に定義（例: /deploy など）:
+# 例（任意のデプロイコマンドを定義）:
 # commands:
-#   firebase:
+#   deploy:
 #     version: true
-#     confirm: "branch {branch} を v{version} で Firebase に上げます。"
-#     prompt: "{branch} の worktree で deliver スキルを使い、バージョン {version} で Firebase App Distribution へ配信して。"
-#   testflight:
-#     version: true
-#     confirm: "branch {branch} を v{version} で TestFlight に上げます。"
-#     prompt: "{branch} の worktree で deliver スキルを使い、バージョン {version} で TestFlight へ配信して。"
+#     confirm: "「{task}」を v{version} でデプロイします。"
+#     prompt: "「{task}」を v{version} でデプロイして。"
 
 bin:
   claude: "claude"
   cmux: "/Applications/cmux.app/Contents/Resources/bin/cmux"
+
+# version:true のコマンド（/deploy 等）が使う「現在バージョン」の取得コマンド。
+# 出力から最初の X.Y.Z を拾う。既定は git タグ。プロジェクトに合わせて変えてよい。
+# version_source: "git describe --tags --abbrev=0"
 
 # レジストリDBの保存先
 registry_db: "./relay_registry.sqlite3"

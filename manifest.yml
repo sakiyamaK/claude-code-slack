@@ -3,7 +3,7 @@
 # ※ App-Level Token（xapp-）だけは別途 Basic Information → App-Level Tokens で生成する。
 display_information:
   name: claude-relay
-  description: Slack から自分の Mac の Claude Code / tcmtasks を動かす中継
+  description: Slack から自分の Mac の Claude Code を動かす中継
 features:
   bot_user:
     display_name: claude-relay

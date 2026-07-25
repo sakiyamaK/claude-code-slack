@@ -104,12 +104,35 @@ class CmuxClient:
         self._wait_ready(surface)  # claude 起動待ち（初回は必須）
         return surface
 
+    def find_manager(self) -> str | None:
+        """既存の relay-manager ワークスペースの端末 surface を返す。
+
+        複数あれば1つだけ残して余剰を閉じる（リーク掃除）。名前で探すので
+        surface ref を記憶する必要がなく、再起動をまたいでも確実に再利用できる。
+        """
+        out = self._run("workspace", "list").stdout or ""
+        ws_refs = []
+        for line in out.splitlines():
+            if MANAGER_WORKSPACE_NAME in line:
+                m = _WORKSPACE_RE.search(line)
+                if m:
+                    ws_refs.append(m.group(0))
+        if not ws_refs:
+            return None
+        keep = ws_refs[0]
+        for extra in ws_refs[1:]:            # 余剰ワークスペースを閉じる
+            self._run("workspace", "close", "--workspace", extra)
+        surfaces = self._run("list-pane-surfaces", "--workspace", keep).stdout
+        sm = _SURFACE_RE.search(surfaces or "")
+        return sm.group(0) if sm else None
+
     def ensure_manager(self, cwd: str, stored_surface: str | None,
                        model: str, permission_mode: str) -> str:
         """cmux 起動＋マネージャー端末確保。使える端末 surface ref を返す。"""
         self.ensure_running()
-        if stored_surface and self.surface_exists(stored_surface):
-            return stored_surface
+        existing = self.find_manager()      # 名前で既存を探して再利用（リーク防止）
+        if existing:
+            return existing
         return self.new_manager(cwd, model, permission_mode)
 
     # ── プロンプト投入（端末 send + Enter） ────────────

@@ -25,23 +25,25 @@
 
 ---
 
-## タスクモードでマネージャーが権限確認で止まる
-`.claude/` 配下の編集などで確認プロンプトが出て無人運用が止まる。
+## 自作 backend のマネージャーが権限確認で止まる
+無人運用中に確認プロンプトが出て止まる。
 - `config.yml` の `behavior.manager_permission_mode: bypassPermissions` にする（無人運用の推奨）
-- マネージャーは manager.agent.md の安全ルール（`rm -rf`/`push --force` 等禁止）＋worktree隔離の下で動く
+- 全許可はあなたのオーケストレーターの安全策＋worktree 隔離が歯止めになる前提
 
 ---
 
-## `作業:` を送ってもマネージャーが動かない
+## `作業:` を送っても自作 backend が動かない
 - cmux（`/Applications/cmux.app`）が起動しているか。relay が自動起動を試みるが、**Mac がログイン画面だと GUI 起動できない**（ログインしておく）
-- cmux 左に `relay-manager` ワークスペースが立ち、**ターミナルで claude が起動**しているか確認
-- 対象プロジェクトに tcmtasks（`.claude/agents/manager.agent.md`）が入っているか
+- cmux に `relay-manager` ワークスペースが立ち、**ターミナルで claude が起動**しているか確認
+- `task.backend` と `backends`（start / watch）が config.yml に正しく定義されているか
+- 迷ったら `task.backend` を外して **solo** で試す（追加ツール不要で動く）
 
 ---
 
-## 完了しても Slack に通知が来ない
-- manager.agent.md に **from-thread 併記ルール**が入っているか（[SETUP.md](./SETUP.md) 参照）。無いと通知のスレッド振り分けができない
-- relay を**再起動した直後**は、監視の基準が現状態になるため、再起動前に完了したものは遡って通知されない（次のタスクから正常）
+## 完了しても Slack に通知が来ない（自作 backend）
+- `watch` に指定した進捗ファイルにオーケストレーターが状況を書いているか（そこを AI が読む）
+- 進捗ファイルに、そのタスクが「完了した」と読み取れる記述があるか（AI が判断できる粒度で書く）
+- relay を**再起動した直後**は監視の基準が現状態になるため、再起動前に完了したものは遡って通知されない（次のタスクから正常）
 
 ---
 

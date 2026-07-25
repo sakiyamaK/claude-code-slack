@@ -1,4 +1,4 @@
-"""普通モードの claude -p ヘッドレス実行（SPEC §5）。
+"""普通モードの claude -p ヘッドレス実行。
 
 - 新規スレッド: claude -p "<prompt>"            → session_id 取得
 - 継続スレッド: claude -p "<prompt>" --resume <sid>
@@ -10,11 +10,11 @@ import json
 import subprocess
 from dataclasses import dataclass
 
-# 普通モードの claude に持たせる前提（タスク状況を聞かれたら dashboard を読む）
+# 普通モードの claude に持たせる前提
 NORMAL_SYSTEM_HINT = (
     "あなたはSlack経由で話しかけられている。"
-    "動作中のタスク状況を聞かれたら、対象リポジトリの .claude/tcmtasks/dashboard.md を"
-    "読んで要約して答えること。回答は簡潔に。"
+    "動作中のタスク状況を聞かれたら、プロジェクトの進捗ファイルがあれば読んで要約して答えること。"
+    "回答は簡潔に。"
 )
 
 

@@ -14,6 +14,7 @@ _DEFAULT_CMUX = "/Applications/cmux.app/Contents/Resources/bin/cmux"
 _CONFIG_CANDIDATES = ["config.yml", "config.yaml"]
 
 
+
 def _load_yaml() -> dict:
     path = os.environ.get("RELAY_CONFIG")
     candidates = [path] if path else _CONFIG_CANDIDATES
@@ -69,15 +70,26 @@ class Config:
     claude_bin: str
     cmux_bin: str
     registry_db: str
-    commands: dict  # プロジェクト固有コマンド: name -> {prompt, version?, confirm?}
+    commands: dict  # ユーザー定義コマンド: name -> {prompt, version?, confirm?}
+    version_source: str  # 現在バージョンを得るシェルコマンド（出力から X.Y.Z を拾う）
+    task_backend: str          # "solo" or backends のキー
+    backends: dict             # name -> {start: [...], watch: "<path>"}
+    solo_worktree: bool        # solo でタスクごとに worktree を切るか
+    solo_base: str             # solo worktree のベース ref（空=対象repoの現在ブランチ）
 
     @property
-    def todo_path(self) -> str:
-        return os.path.join(self.target_repo, ".claude/tcmtasks/todo.md")
+    def is_solo(self) -> bool:
+        return self.task_backend == "solo"
 
     @property
-    def dashboard_path(self) -> str:
-        return os.path.join(self.target_repo, ".claude/tcmtasks/dashboard.md")
+    def backend(self) -> dict:
+        return self.backends.get(self.task_backend, {})
+
+    @property
+    def watch_path(self) -> str:
+        """外部 backend の進捗監視ファイル（絶対パス）。無ければ空。"""
+        p = self.backend.get("watch")
+        return os.path.join(self.target_repo, p) if p else ""
 
     @staticmethod
     def load() -> "Config":
@@ -99,6 +111,14 @@ class Config:
         workspace = str(_get(y, "paths", "workspace_dir", default="")).strip().rstrip("/") or os.path.dirname(target)
         keywords = _as_list(_get(y, "behavior", "task_keywords", default=None)) or ["作業", "タスク", "task"]
 
+        # タスク背骨: 既定 solo。backend は config の task.backends で各自定義。
+        task_cfg = (y.get("task") or {}) if isinstance(y, dict) else {}
+        task_backend = os.environ.get("TASK_BACKEND") or task_cfg.get("backend") or "solo"
+        backends = {k: dict(v) for k, v in (task_cfg.get("backends") or {}).items()}
+        solo_cfg = task_cfg.get("solo") or {}
+        solo_worktree = _as_bool(solo_cfg.get("worktree", True))
+        solo_base = str(solo_cfg.get("base", "")).strip()
+
         return Config(
             slack_bot_token=bot,
             slack_app_token=app,
@@ -118,4 +138,10 @@ class Config:
             cmux_bin=str(_get(y, "bin", "cmux", default=_DEFAULT_CMUX)).strip(),
             registry_db=str(_get(y, "registry_db", default="./relay_registry.sqlite3")).strip(),
             commands=(y.get("commands") or {}) if isinstance(y, dict) else {},
+            version_source=str(_get(y, "version_source",
+                                    default="git describe --tags --abbrev=0")).strip(),
+            task_backend=task_backend,
+            backends=backends,
+            solo_worktree=solo_worktree,
+            solo_base=solo_base,
         )

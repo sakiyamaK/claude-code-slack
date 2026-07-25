@@ -3,6 +3,10 @@ config.yml
 config.yaml
 .env
 
+# 設計メモ・作業引き継ぎ（社内固有の記述を含むため非公開・ローカルのみ）
+SPEC.md
+STATUS.md
+
 # ランタイム
 .venv/
 __pycache__/

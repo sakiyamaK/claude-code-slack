@@ -1,7 +1,7 @@
 """入力パース層（純粋ロジック・副作用なし）。
 
 - タスクモード判定（寛容パース）
-- コマンド判定（/model /mode /commit /push /firebase /testflight）
+- コマンド判定（組み込み /model /mode /commit /push＋config 定義のカスタム）
 - バージョン記法（X.X.X+1 等）→ 具体的なバージョン算出
 
 SPEC §6, §13, §13.5 準拠。

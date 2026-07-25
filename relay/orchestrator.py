@@ -1,6 +1,8 @@
-"""司令塔（SPEC 全体）。ルーティング・普通/タスクモード・コマンド・通知監視を束ねる。"""
+"""司令塔。ルーティング・普通/タスクモード・コマンド・進捗監視(AI解釈)を束ねる。"""
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import subprocess
 import threading
@@ -8,9 +10,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
-from . import dashboard as dash
 from . import intent as intent_mod
-from . import todo as todo_mod
+from . import interpret as interp_mod
 from .cmux import CmuxClient, CmuxUnavailable
 from .config import Config
 from .parsing import (
@@ -33,7 +34,7 @@ MODE_CHOICES = [
 ]
 BYPASS_CHOICE = ("bypassPermissions", "yolo(全許可)")
 
-_VER_RE = re.compile(r"increment version\s+(\d+)\.(\d+)\.(\d+)")
+_VER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
 class Orchestrator:
@@ -47,7 +48,8 @@ class Orchestrator:
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._pending_pick: dict[str, str] = {}  # thread_ts -> "model"|"mode"
-        self._dash_state: dash.DashboardState | None = None
+        self._watch_hash: str | None = None                # 進捗ファイル変化検知
+        self._notified: dict[str, list[str]] = {}          # thread -> 通知済み要約
         # グローバル設定の初期化
         if self.registry.get_setting("model") is None:
             self.registry.set_setting("model", cfg.default_model)
@@ -138,36 +140,98 @@ class Orchestrator:
         return surface
 
     def _task_mode(self, channel: str, user: str, thread_ts: str, body: str) -> None:
-        print(f"[relay] task_mode: ensure cmux manager…", flush=True)
-        surface = self._ensure_manager()
-        print(f"[relay] manager surface = {surface}", flush=True)
-        cont = todo_mod.find_entry_by_thread(self.cfg.todo_path, thread_ts)
-        _, branch = todo_mod.append_task(self.cfg.todo_path, body, thread_ts)
+        if self.cfg.is_solo:
+            self._solo_task(channel, user, thread_ts, body)
+        else:
+            self._backend_task(channel, user, thread_ts, body)
 
+    _SOLO_HINT = (
+        "あなたは隔離された作業ディレクトリ（detached worktree）にいる。"
+        "コードを変更するなら、まず適切な名前のブランチを作って作業すること。回答は簡潔に。"
+    )
+
+    def _solo_cwd(self, thread_ts: str) -> str:
+        """solo: タスクごとに worktree を切って隔離する（並行しても衝突しない）。"""
+        if not self.cfg.solo_worktree:
+            return self.cfg.target_repo
+        name = "task-" + re.sub(r"[^0-9A-Za-z]", "-", thread_ts)
+        path = os.path.join(self.cfg.worktree_parent, name)
+        if not os.path.isdir(path):
+            base = self.cfg.solo_base or "HEAD"
+            r = subprocess.run(
+                ["git", "-C", self.cfg.target_repo, "worktree", "add", "--detach", path, base],
+                capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"worktree 作成失敗: {r.stderr.strip()}")
+        return path
+
+    def _solo_task(self, channel: str, user: str, thread_ts: str, body: str) -> None:
+        """依存ゼロの簡易実行: タスクごとに worktree を切り claude -p を回して結果を返す。"""
+        print(f"[relay] solo task", flush=True)
+        task = self.registry.get(thread_ts)
+        session = task.session_id if task else None
+        if task is None:
+            self.registry.create(Task(
+                thread_ts=thread_ts, channel_id=channel, user_id=user, mode=MODE_TASK,
+                branch=None, session_id=None, anchor_ts=None, status=STATUS_ACTIVE,
+                created_at=now_iso(), updated_at=now_iso()))
+        cwd = self._solo_cwd(thread_ts) if session is None else self.cfg.target_repo
+        self.post(channel, thread_ts, "🛠 タスクを実行します…")
+        res = self.runner.run(
+            body, cwd, model=self.model,
+            permission_mode=self.cfg.manager_permission_mode,
+            resume_session=session, append_system=self._SOLO_HINT)
+        if res.session_id:
+            self.registry.update(thread_ts, session_id=res.session_id)
+        head = "✅ 完了" if res.ok else "⚠️ 失敗"
+        self.post(channel, thread_ts, f"{head}\n\n{res.text[:3500]}")
+
+    def _backend_task(self, channel: str, user: str, thread_ts: str, body: str) -> None:
+        """プロジェクトのオーケストレーターに委譲: start フックを実行して起動。"""
+        print(f"[relay] backend={self.cfg.task_backend} start", flush=True)
         existing = self.registry.get(thread_ts)
         if existing is None:
             self.registry.create(Task(
                 thread_ts=thread_ts, channel_id=channel, user_id=user, mode=MODE_TASK,
-                branch=branch, session_id=None, anchor_ts=None, status=STATUS_ACTIVE,
-                created_at=now_iso(), updated_at=now_iso(),
-            ))
-        elif branch:
-            self.registry.update(thread_ts, branch=branch)
-
-        verb = "継続指示を追記" if cont else "新規タスクを追記"
-        # /tcmtasks -t で todo.md を読み込ませてマネージャーとして処理させる
-        self.cmux.send(surface, "/tcmtasks -t")
+                branch=None, session_id=None, anchor_ts=None, status=STATUS_ACTIVE,
+                created_at=now_iso(), updated_at=now_iso()))
+        # タスク内容を保持（進捗の AI 解釈でスレッドに紐付けるため）
+        self.registry.set_setting(f"instr:{thread_ts}", body)
+        self._run_start_steps(thread_ts, body)
         self.post(channel, thread_ts,
-                  f"🚀 cmux のマネージャーに{verb}しました。進捗はこのスレッドに通知します。")
+                  f"🚀 タスクを開始しました（{self.cfg.task_backend}）。進捗はこのスレッドに通知します。")
+
+    def _run_start_steps(self, thread_ts: str, body: str) -> None:
+        """backend の start フック（inject/file/command のリスト）を順に実行。"""
+        ctx = {"task": body, "id": thread_ts}
+        steps = self.cfg.backend.get("start") or []
+        for step in steps:
+            kind = (step or {}).get("kind")
+            if kind == "inject":
+                surface = self._ensure_manager()
+                self.cmux.send(surface, self._fmt(step.get("prompt", "{task}"), ctx))
+            elif kind == "file":
+                path = os.path.join(self.cfg.target_repo, step["path"])
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                entry = self._fmt(step.get("template", "{task}\n"), ctx)
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write("\n" + entry + "\n")
+            elif kind == "command":
+                subprocess.run(self._fmt(step.get("command", ""), ctx),
+                               shell=True, cwd=self.cfg.target_repo,
+                               capture_output=True, text=True)
 
     def _operation(self, channel: str, thread_ts: str, it: intent_mod.Intent, text: str) -> None:
+        if self.cfg.is_solo:
+            self.post(channel, thread_ts, "solo モードでは個別タスクの中断は未対応です。")
+            return
         try:
             surface = self._ensure_manager()
         except CmuxUnavailable as e:
             self.post(channel, thread_ts, f"⚠️ {e}")
             return
         target = it.task or "（対象未指定）"
-        self.cmux.send(surface, f"社長からの指示: {text}")
+        self.cmux.send(surface, f"指示: {text}")
         self.post(channel, thread_ts, f"🛑 マネージャーに「{target} を止める」指示を送りました。")
 
     # ── コマンド ───────────────────────────────────────
@@ -183,13 +247,14 @@ class Orchestrator:
                       f"未知のコマンド: /{name}。config.yml の commands で定義できます。")
 
     def _custom_command(self, channel: str, thread_ts: str, name: str, arg: str) -> None:
-        """config.yml で定義したプロジェクト固有コマンドを実行（マネージャーへ指示）。"""
+        """config.yml で定義したユーザー定義コマンドを実行（マネージャーへ指示）。"""
         spec = self.cfg.commands[name] or {}
-        branch = self._thread_branch(thread_ts)
-        if not branch and "{branch}" in spec.get("prompt", ""):
+        ref = self._task_ref(thread_ts)
+        prompt_tpl = spec.get("prompt", "")
+        if not ref and ("{task}" in prompt_tpl or "{branch}" in prompt_tpl):
             self.post(channel, thread_ts, "このスレッドはタスクに紐付いていません。")
             return
-        ctx = {"branch": branch or "", "arg": arg}
+        ctx = {"task": ref or "", "branch": ref or "", "arg": arg}
         # バージョン記法を使うコマンド（配信等）
         if spec.get("version"):
             cur = self.current_version()
@@ -245,79 +310,97 @@ class Orchestrator:
         self.registry.set_setting(key, value)
         self.post(channel, thread_ts, f"✅ {('モデル' if kind=='model' else '動作モード')}を「{disp}」にしました（全スレッド共通）。")
 
-    def _thread_branch(self, thread_ts: str) -> str | None:
+    def _task_ref(self, thread_ts: str) -> str | None:
+        """このスレッドのタスクを指す参照（依頼内容）。マネージャーがどのタスクか特定する手掛かり。"""
         t = self.registry.get(thread_ts)
-        return t.branch if t and t.mode == MODE_TASK else None
+        if not t or t.mode != MODE_TASK:
+            return None
+        instr = self.registry.get_setting(f"instr:{thread_ts}", "")
+        return (instr or "").strip()[:120] or None
 
     def _git_command(self, channel: str, thread_ts: str, name: str) -> None:
-        branch = self._thread_branch(thread_ts)
-        if not branch:
+        if self.cfg.is_solo:
+            self.post(channel, thread_ts, "solo モードでは /commit /push は使いません（タスク内で直接お願いします）。")
+            return
+        ref = self._task_ref(thread_ts)
+        if not ref:
             self.post(channel, thread_ts, "このスレッドはタスクに紐付いていません。どのタスクですか？")
             return
         surface = self._ensure_manager()
         if name == "commit":
-            self.cmux.send(surface, f"社長承認: {branch} をコミットしてください。")
-            self.post(channel, thread_ts, f"📝 {branch} のコミットをマネージャーに指示しました。")
+            self.cmux.send(surface, f"承認します。「{ref}」のタスクの成果をコミットしてください。")
+            self.post(channel, thread_ts, "📝 コミットをマネージャーに指示しました。")
         else:
-            self.cmux.send(surface, f"社長指示: {branch} を origin に push してください。")
-            self.post(channel, thread_ts, f"⬆️ {branch} の push をマネージャーに指示しました。")
+            self.cmux.send(surface, f"「{ref}」のタスクのブランチを origin に push してください。")
+            self.post(channel, thread_ts, "⬆️ push をマネージャーに指示しました。")
 
     def current_version(self) -> tuple[int, int, int]:
+        """config の version_source（シェルコマンド）を実行し、出力から X.Y.Z を拾う。"""
         try:
             out = subprocess.run(
-                ["git", "-C", self.cfg.target_repo, "log", "-50", "--pretty=%s"],
-                capture_output=True, text=True, timeout=10,
+                self.cfg.version_source, shell=True, cwd=self.cfg.target_repo,
+                capture_output=True, text=True, timeout=15,
             ).stdout
-            for line in out.splitlines():
-                m = _VER_RE.search(line)
-                if m:
-                    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            m = _VER_RE.search(out)
+            if m:
+                return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
         except Exception:
             pass
         return (0, 0, 0)
 
-    # ── dashboard 監視（通知） ─────────────────────────
-    def start_watcher(self, interval: int = 15) -> None:
+    # ── 進捗監視（AI 解釈で通知） ───────────────────────
+    def start_watcher(self, interval: int = 20) -> None:
+        # solo は end=プロセス終了で結果を返すため監視不要。外部 backend のみ監視。
+        if self.cfg.is_solo or not self.cfg.watch_path:
+            return
         threading.Thread(target=self._watch_loop, args=(interval,), daemon=True).start()
 
     def _watch_loop(self, interval: int) -> None:
         while True:
             try:
-                self._poll_dashboard()
+                self._poll_watch()
             except Exception:
                 pass
             time.sleep(interval)
 
-    def _poll_dashboard(self) -> None:
-        import os
-        if not os.path.exists(self.cfg.dashboard_path):
+    def _poll_watch(self) -> None:
+        path = self.cfg.watch_path
+        if not path or not os.path.exists(path):
             return
-        with open(self.cfg.dashboard_path, "r", encoding="utf-8") as f:
-            cur = dash.parse_dashboard(f.read())
-        events = dash.diff_events(self._dash_state, cur)
-        self._dash_state = cur
-        for e in events:
-            self._notify_event(e)
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        h = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if h == self._watch_hash:
+            return  # 変化なし → LLM を呼ばない（デバウンス）
+        self._watch_hash = h
 
-    def _notify_event(self, e: dash.Event) -> None:
-        icon = {"done": "✅", "review": "🔨", "stall": "⚠️", "alert": "🚨", "report": "📋"}.get(e.kind, "ℹ️")
-        if e.kind == "review":
-            body = f"{icon} {e.task} 実装・テスト完了、レビューへ"
-        elif e.kind == "done":
-            body = f"{icon} {e.task} 完了"
-        elif e.kind == "stall":
-            body = f"{icon} {e.task} が停滞しています（{e.detail}）"
-        elif e.kind == "report":
-            body = f"{icon} {e.task}\n\n{e.detail[:3000]}"
-        else:
-            body = f"{icon} 要判断: {e.detail}"
-        # thread_ts からチャンネルを解決して該当スレッドへ
-        if e.thread_ts:
-            t = self.registry.get(e.thread_ts)
-            if t:
-                if e.kind == "done":
-                    self.registry.update(e.thread_ts, status=STATUS_DONE)
-                self.post(t.channel_id, e.thread_ts, body)
-                return
-        # 未紐付け（PC発タスク等）: 既定チャンネルがあれば流す。無ければ skip
-        # （SPEC §15: 普通モードで「何が動いてる？」と聞けば見えるので取りこぼしにはならない）
+        # 追跡中の backend タスク（id=thread, task=依頼内容）
+        tasks = []
+        for t in self.registry.active_tasks():
+            if t.mode != MODE_TASK:
+                continue
+            instr = self.registry.get_setting(f"instr:{t.thread_ts}", "")
+            tasks.append({"id": t.thread_ts, "task": instr or "(内容不明)"})
+        if not tasks:
+            return
+
+        # 解釈は安価なモデルで（頻繁に呼ぶため）
+        events = interp_mod.interpret(
+            self.cfg.claude_bin, "haiku", self.cfg.target_repo,
+            content, tasks, self._notified)
+        for e in events:
+            self._notify_ai_event(e)
+
+    def _notify_ai_event(self, e: interp_mod.InterpEvent) -> None:
+        # 重複排除（同一スレッドで同じ要約は送らない）
+        sent = self._notified.setdefault(e.thread_ts, [])
+        if e.summary in sent:
+            return
+        sent.append(e.summary)
+        t = self.registry.get(e.thread_ts)
+        if not t:
+            return
+        icon = {"done": "✅", "alert": "🚨", "progress": "🔨"}.get(e.kind, "ℹ️")
+        if e.kind == "done":
+            self.registry.update(e.thread_ts, status=STATUS_DONE)
+        self.post(t.channel_id, e.thread_ts, f"{icon} {e.summary}")
