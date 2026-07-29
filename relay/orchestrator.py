@@ -455,8 +455,8 @@ class Orchestrator:
         tasks = self._active_task_list()
         if not tasks:
             return
-        events = interp_mod.interpret(   # 頻繁に呼ぶので安価なモデル
-            self.cfg.claude_bin, "haiku", self.cfg.target_repo,
+        events = interp_mod.interpret(   # 現在の /model 設定を使う（品質を model 選択に委ねる）
+            self.cfg.claude_bin, self.model, self.cfg.target_repo,
             content, tasks, self._notified)
         for e in events:
             self._notify_ai_event(e)
