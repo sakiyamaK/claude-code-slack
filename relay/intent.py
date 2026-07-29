@@ -8,10 +8,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# 「止める」系の操作意図
-STOP_MARKERS = [
-    "止め", "停止", "やめ", "中断", "キャンセル", "ストップ", "stop", "cancel", "kill",
-]
+# 「止める」系の操作意図。
+# 単純な部分一致は誤爆する（kill ⊂ skill / stop ⊂ stopped / 止め ⊂ 受け止める）ため、
+# ASCII は単語境界を要求し、日本語は指示形に絞る。
+_ASCII_STOP_RE = re.compile(r"\b(?:stop|cancel|kill|abort)\b", re.IGNORECASE)
+# 「止め」は直前が動詞連用形のかななら複合動詞（受け止める・書き止める・呼び止める等）
+# なので除外する。
+_JA_STOP_RE = re.compile(
+    r"(?<![けきいびみち])止め[てろ]|やめ[てろ]|中断|中止|停止|キャンセル|ストップ"
+)
 
 
 @dataclass
@@ -30,8 +35,8 @@ def _match_task(text: str, known_tasks: list[str]) -> str | None:
 
 
 def classify(text: str, known_tasks: list[str]) -> Intent:
-    t = (text or "").lower()
-    is_stop = any(m in t for m in STOP_MARKERS)
+    t = text or ""
+    is_stop = bool(_ASCII_STOP_RE.search(t) or _JA_STOP_RE.search(t))
     if is_stop:
         return Intent(is_operation=True, action="stop",
                       task=_match_task(text, known_tasks))

@@ -1,4 +1,6 @@
 # Slack アプリ作成用マニフェスト（From a manifest に貼る）
+# ※ 貼り付け欄に JSON / YAML のタブがある。これは YAML なので必ず YAML タブに貼る
+#    （JSON タブに貼ると、この行のコメントが原因で「line 1」のエラーになる）
 # これで scope / message.im / App Home の送信許可 / Socket Mode まで一括設定される。
 # ※ App-Level Token（xapp-）だけは別途 Basic Information → App-Level Tokens で生成する。
 display_information:

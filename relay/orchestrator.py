@@ -107,16 +107,19 @@ class Orchestrator:
         # 3.5) 既にタスクスレッドなら、以降のやりとりもタスクモードで継続
         existing = self.registry.get(thread_ts)
         active = [t.branch for t in self.registry.active_tasks() if t.branch]
+        # solo には個別タスクの中断機構が無いので、操作として扱わず指示のまま流す
+        # （誤判定で指示を取り落とすほうが害が大きい）。
+        as_operation = not self.cfg.is_solo
         if existing and existing.mode == MODE_TASK:
             it = intent_mod.classify(text, active)
-            if it.is_operation:
+            if it.is_operation and as_operation:
                 self._operation(channel, thread_ts, it, text)
             else:
                 self._task_follow_up(channel, user, thread_ts, text)
             return
         # 4) 自然言語 → 操作 or 普通モード（タスク未紐付けのスレッド）
         it = intent_mod.classify(text, active)
-        if it.is_operation:
+        if it.is_operation and as_operation:
             self._operation(channel, thread_ts, it, text)
         else:
             self._normal_mode(channel, thread_ts, text)
@@ -217,7 +220,9 @@ class Orchestrator:
                 thread_ts=thread_ts, channel_id=channel, user_id=user, mode=MODE_TASK,
                 branch=None, session_id=None, anchor_ts=None, status=STATUS_ACTIVE,
                 created_at=now_iso(), updated_at=now_iso()))
-        cwd = self._solo_cwd(thread_ts) if session is None else self.cfg.target_repo
+        # 継続指示も同じ worktree で動かす（_solo_cwd は既存なら作り直さない）。
+        # target_repo に切り替えると、2通目以降の変更が隔離先ではなく本体リポジトリに入る。
+        cwd = self._solo_cwd(thread_ts)
         self.post(channel, thread_ts, "🛠 タスクを実行します…")
         res = self.runner.run(
             body, cwd, model=self.model,
