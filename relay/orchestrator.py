@@ -185,6 +185,9 @@ class Orchestrator:
         return surface
 
     def _task_mode(self, channel: str, user: str, thread_ts: str, body: str) -> None:
+        # 依頼内容を保持（進捗の AI 解釈でスレッドに紐付ける手掛かり。solo→backend に
+        # 切り替えたときも「内容不明のタスク」が残らないよう、どちらの経路でも記録する）
+        self.registry.set_setting(f"instr:{thread_ts}", body)
         if self.cfg.is_solo:
             self._solo_task(channel, user, thread_ts, body)
         else:
@@ -258,8 +261,6 @@ class Orchestrator:
                 thread_ts=thread_ts, channel_id=channel, user_id=user, mode=MODE_TASK,
                 branch=None, session_id=None, anchor_ts=None, status=STATUS_ACTIVE,
                 created_at=now_iso(), updated_at=now_iso()))
-        # タスク内容を保持（進捗の AI 解釈でスレッドに紐付けるため）
-        self.registry.set_setting(f"instr:{thread_ts}", body)
         self._run_start_steps(thread_ts, body)
         self.post(channel, thread_ts,
                   f"🚀 タスクを開始しました（{self.cfg.task_backend}）。進捗はこのスレッドに通知します。")
@@ -433,13 +434,20 @@ class Orchestrator:
             time.sleep(interval)
 
     def _active_task_list(self) -> list[dict]:
-        """追跡中の backend タスク（id=thread, task=依頼内容）。"""
+        """追跡中の backend タスク（id=thread, task=依頼内容）。
+
+        依頼内容が分からないタスクは渡さない。「(内容不明)」として渡すと、
+        進捗ファイルに混在する無関係な話題（人が手で進めている作業など）が
+        そのスレッドに誤って紐付けられる。
+        """
         tasks = []
         for t in self.registry.active_tasks():
             if t.mode != MODE_TASK:
                 continue
-            instr = self.registry.get_setting(f"instr:{t.thread_ts}", "")
-            tasks.append({"id": t.thread_ts, "task": instr or "(内容不明)"})
+            instr = (self.registry.get_setting(f"instr:{t.thread_ts}", "") or "").strip()
+            if not instr:
+                continue
+            tasks.append({"id": t.thread_ts, "task": instr})
         return tasks
 
     def _interpret_and_notify(self, content: str) -> None:
