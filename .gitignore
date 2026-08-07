@@ -1,5 +1,6 @@
 # トークンを含むので絶対にコミットしない
 config.yml
+config.yml.bak-*
 config.yaml
 .env
 

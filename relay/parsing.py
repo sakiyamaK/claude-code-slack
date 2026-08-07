@@ -1,10 +1,8 @@
 """入力パース層（純粋ロジック・副作用なし）。
 
-- タスクモード判定（寛容パース）
 - コマンド判定（組み込み /model /mode /commit /push＋config 定義のカスタム）
 - バージョン記法（X.X.X+1 等）→ 具体的なバージョン算出
-
-SPEC §6, §13, §13.5 準拠。
+- テンプレ整形（未定義プレースホルダは保持）
 """
 from __future__ import annotations
 
@@ -12,29 +10,7 @@ import re
 from dataclasses import dataclass
 
 
-# ── タスクモード判定（SPEC §6） ─────────────────────────
-def build_task_regex(keywords: list[str]) -> re.Pattern:
-    """先頭 (作業|タスク|task) [:：] 本文 を寛容にマッチする正規表現を作る。"""
-    alt = "|".join(re.escape(k) for k in keywords)
-    return re.compile(rf"^\s*(?:{alt})\s*[:：]\s*([\s\S]*)$", re.IGNORECASE)
-
-
-@dataclass
-class TaskParse:
-    is_task: bool
-    body: str = ""          # 区切り以降の本文（改行含む）
-    empty_body: bool = False  # 「作業:」だけで本文が空
-
-
-def parse_task_mode(text: str, keywords: list[str]) -> TaskParse:
-    m = build_task_regex(keywords).match(text or "")
-    if not m:
-        return TaskParse(is_task=False)
-    body = m.group(1).strip()
-    return TaskParse(is_task=True, body=body, empty_body=(body == ""))
-
-
-# ── コマンド判定（SPEC §13, §13.5） ─────────────────────
+# ── コマンド判定 ────────────────────────────────────────
 # 組み込み（generic）。プロジェクト固有コマンドは config.yml の commands で定義する。
 BUILTIN_COMMANDS = {"model", "mode", "commit", "push"}
 
@@ -116,3 +92,12 @@ def parse_version_spec(
         corrected=corrected,
         note=note,
     )
+
+
+# ── テンプレ整形 ────────────────────────────────────────
+def format_template(template: str, ctx: dict) -> str:
+    """{key} を埋める。未定義プレースホルダはそのまま残す。"""
+    class _Defaulting(dict):
+        def __missing__(self, k):
+            return "{" + k + "}"
+    return (template or "").format_map(_Defaulting(ctx))

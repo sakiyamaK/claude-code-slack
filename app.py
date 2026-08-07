@@ -1,90 +1,64 @@
-"""Slack Bolt (Socket Mode) エントリ（SPEC §2, §4, §10, §11, §16）。
+"""Slack Bolt (Socket Mode) エントリ。
 
-- DM 専用（message.im）
+- DM 専用（message.im）＋チャンネルでの @メンション
 - ゲート: 許可ユーザー / 許可チャンネル
 - 受信即 👀 ack（生死確認）
 - 起動時 catch-up（切断中の未処理 DM を拾う）
+
+import 時の副作用は無い。組み立ては main()（テストは register_handlers / catch_up 単位で可能）。
 """
 from __future__ import annotations
-
-import re
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from relay.config import Config
+from relay.gate import is_allowed, strip_mentions
 from relay.orchestrator import Orchestrator
 
-cfg = Config.load()
-app = App(token=cfg.slack_bot_token)
 
-_MENTION_RE = re.compile(r"<@[^>]+>")
+def register_handlers(app: App, cfg: Config, orch: Orchestrator) -> None:
+    def _allowed(user_id: str, channel_id: str) -> bool:
+        return is_allowed(user_id, channel_id,
+                          cfg.allowed_user_ids, cfg.allowed_channel_ids)
 
+    def _ack_eyes(channel: str, ts: str) -> None:
+        try:
+            app.client.reactions_add(channel=channel, timestamp=ts, name="eyes")
+        except Exception as e:
+            # ack は失敗しても処理は続けるが、沈黙させず必ずログに残す
+            print(f"[relay] ⚠️ 👀 リアクション失敗: {e}", flush=True)
 
-def _post(channel: str, thread_ts: str | None, text: str) -> None:
-    app.client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
+    def _accept(event) -> None:
+        user = event.get("user", "")
+        channel = event.get("channel", "")
+        ts = event.get("ts", "")
+        thread_ts = event.get("thread_ts") or ts
+        text = strip_mentions(event.get("text", ""))
+        if not _allowed(user, channel):
+            return
+        _ack_eyes(channel, ts)
+        orch.runtime.mark_processed(ts)
+        orch.handle(channel, user, thread_ts, text)
 
+    @app.event("app_mention")
+    def on_mention(event, logger):
+        # チャンネルで @claude-relay とメンションされたとき（DM制限の回避経路）
+        _accept(event)
 
-orch = Orchestrator(cfg, _post)
-
-
-def _strip(text: str) -> str:
-    return _MENTION_RE.sub("", text or "").strip()
-
-
-def _allowed(user_id: str, channel_id: str) -> bool:
-    if cfg.allowed_user_ids and user_id not in cfg.allowed_user_ids:
-        return False
-    if cfg.allowed_channel_ids and channel_id not in cfg.allowed_channel_ids:
-        return False
-    return True
-
-
-def _ack_eyes(channel: str, ts: str) -> None:
-    try:
-        app.client.reactions_add(channel=channel, timestamp=ts, name="eyes")
-    except Exception:
-        pass
-
-
-@app.event("app_mention")
-def on_mention(event, logger):
-    # チャンネルで @claude-relay とメンションされたとき（DM制限の回避経路）
-    user = event.get("user", "")
-    channel = event.get("channel", "")
-    ts = event.get("ts", "")
-    thread_ts = event.get("thread_ts") or ts
-    text = _strip(event.get("text", ""))
-    if not _allowed(user, channel):
-        return
-    _ack_eyes(channel, ts)
-    orch.registry.set_setting("last_processed_ts", ts)
-    orch.handle(channel, user, thread_ts, text)
+    @app.event("message")
+    def on_message(event, logger):
+        # bot 自身・編集・システム系は無視
+        if event.get("bot_id") or event.get("subtype"):
+            return
+        if event.get("channel_type") != "im":  # DM 専用
+            return
+        _accept(event)
 
 
-@app.event("message")
-def on_message(event, logger):
-    # bot 自身・編集・システム系は無視
-    if event.get("bot_id") or event.get("subtype"):
-        return
-    if event.get("channel_type") != "im":  # DM 専用
-        return
-    user = event.get("user", "")
-    channel = event.get("channel", "")
-    ts = event.get("ts", "")
-    thread_ts = event.get("thread_ts") or ts
-    text = _strip(event.get("text", ""))
-
-    if not _allowed(user, channel):
-        return
-    _ack_eyes(channel, ts)
-    orch.registry.set_setting("last_processed_ts", ts)
-    orch.handle(channel, user, thread_ts, text)
-
-
-def _catch_up() -> None:
+def catch_up(app: App, cfg: Config, orch: Orchestrator) -> None:
     """起動時: 各許可ユーザーとの DM 履歴を last_processed_ts 以降で拾い直す。"""
-    last = orch.registry.get_setting("last_processed_ts")
+    last = orch.runtime.last_processed_ts
     if not last:
         return
     try:
@@ -101,23 +75,48 @@ def _catch_up() -> None:
             if m.get("bot_id") or m.get("subtype") or m.get("ts", "") <= last:
                 continue
             user = m.get("user", "")
-            if not _allowed(user, ch):
+            if not is_allowed(user, ch, cfg.allowed_user_ids, cfg.allowed_channel_ids):
                 continue
             ts = m.get("ts", "")
             thread_ts = m.get("thread_ts") or ts
-            _post(ch, thread_ts, "⏰ 復帰しました。未処理の指示を処理します。")
-            orch.registry.set_setting("last_processed_ts", ts)
-            orch.handle(ch, user, thread_ts, _strip(m.get("text", "")))
+            orch.post(ch, thread_ts, "⏰ 復帰しました。未処理の指示を処理します。")
+            orch.runtime.mark_processed(ts)
+            orch.handle(ch, user, thread_ts, strip_mentions(m.get("text", "")))
+
+
+def self_check(app: App) -> None:
+    """起動時の疎通確認。失敗した経路を具体的に表示する。"""
+    try:
+        r = app.client.auth_test()
+        print(f"  ✅ Slack Web API 疎通 OK（workspace: {r.get('team')} / bot: {r.get('user')}）")
+    except Exception as e:
+        print(f"  ❌ Slack Web API に接続できません（返信・リアクションが失敗します）: {e}")
+        print("     ネットワーク/VPN/プロキシを確認して再起動してください。")
 
 
 def main() -> None:
+    cfg = Config.load()
+    app = App(token=cfg.slack_bot_token)
+
+    def poster(channel: str, thread_ts: str | None, text: str) -> None:
+        try:
+            app.client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
+        except Exception as e:
+            # Slack へ届けられない失敗は必ずコンソールに残す（無言で消さない）
+            print(f"[relay] ❌ Slack への投稿失敗: {e} / text={text[:80]!r}", flush=True)
+            raise
+
+    orch = Orchestrator(cfg, poster)
+    register_handlers(app, cfg, orch)
+
     print("[claude-code-slack] Socket Mode 起動")
-    print(f"  target_repo    = {cfg.target_repo}")
-    print(f"  workspace_dir  = {cfg.workspace_dir}")
-    print(f"  max_concurrent = {cfg.max_concurrent}")
+    self_check(app)
+    for rname, rpath in cfg.repos.items():
+        mark = "*" if rname == cfg.default_repo else " "
+        print(f"  repo {mark}{rname:<9} = {rpath}")
     print(f"  model/mode     = {orch.model} / {orch.permission_mode}")
     orch.start_watcher()
-    _catch_up()
+    catch_up(app, cfg, orch)
     SocketModeHandler(app, cfg.slack_app_token).start()
 
 

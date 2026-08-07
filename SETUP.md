@@ -1,68 +1,52 @@
-# SETUP（設定・バックエンド・チーム配布）
+# SETUP（設定・仕組み・チーム配布）
 
 README で動かせた後の、少し踏み込んだ設定。
 
 ---
 
-## タスクの実行方式（backend）
+## タスクの実行の仕組み（1タスク=1 cmux セッション）
 
-`作業:` を送ったときの処理方式を `config.yml` の `task.backend` で選ぶ。
+DM のメッセージはそのまま作業指示（プレフィックス不要）。タスクごとに cmux のセッション（workspace タブ）を1つ割り当て、
+Slack スレッドと同期する（**cmux 必須**）。relay は次の順で動く:
 
-relay はタスクを **start → watch** のライフサイクルで回す。各フックを config で差す。
+1. **既存セッションとの照合**: いま cmux で動いているセッション（手で開いた窓も含む）を列挙し、
+   指示がそのどれかの作業そのものなら**そのセッションへ連携（注入）**する。
+   照合はチケットID等の決定的一致 → 決まらなければ AI がタブ名・タイトル・作業ディレクトリで判定
+   （曖昧なら連携しない＝誤注入より新規作成を選ぶ）。
+2. **新規ならタブを増やす**: 該当が無ければ作業先リポジトリを振り分け（後述）、cmux に
+   **名前付きタブ**を作って対話 claude を起動し、指示を注入する。
+   **cmux の UI からいつでも作業の様子を確認できる**（タブは作成時に最前面だったウィンドウに入る）。
+3. **スレッド ⇔ セッションの永続紐付け（1スレッド=1surface）**: 以降そのスレッドの発言
+   （追加指示・質問）は同じセッションへ届き、「やめて」は ESC 割り込み＋中断指示になる。
+   一度紐付いた surface は他のスレッドに取られない。relay を再起動しても紐付けは残る（SQLite）。
+4. **進捗通知**: relay が各セッションの画面を監視し（変化検知でデバウンス）、AI が内容を解釈して
+   ✅完了 / 🚨要判断 / 🔨節目 をスレッドへ返す。**決まった書式も相関タグも不要**。
 
-### solo（既定・どこでも動く）
-`backend` 未指定なら solo。**タスクごとに worktree を切って** `claude` を回し、結果をスレッドに返す。
-worktree 隔離により**複数タスクを安全に並行**できる。追加ツール不要。
-
-```yaml
-task:
-  solo:
-    worktree: true     # タスクごとに worktree（既定 true）
-    base: ""           # ベース ref（空=現在ブランチ）
-```
-
-### 自作 backend（自分のマルチエージェント/オーケストレーターを使う）
-自前の「タスクを受けて処理する仕組み」を持っているなら差し込める。relay は共通部分
-（cmux 上のマネージャー常駐・スレッド紐付け・進捗の AI 解釈・通知）を担う。
-
-```yaml
-task:
-  backend: my-agents
-  backends:
-    my-agents:
-      start:                          # タスク開始時のフック（順に実行）
-        - kind: inject                #   inject: マネージャー(claude)にプロンプト注入
-          prompt: "新規タスク {id}: {task}"
-        # - kind: file                #   file: ファイルにタスクを書く
-        #   path: ".agents/todo.md"
-        #   template: "{task}\n"
-        # - kind: command             #   command: 任意のシェルコマンド
-        #   command: "my-agents add '{task}'"
-      watch: ".agents/progress.md"    # relay が監視。AI が中身を読んで完了/停滞/要判断を通知
-      watch_manager: true             # 任意。マネージャー端末の直接返答も AI で拾う（既定 false）
-```
-
-**契約はこれだけ**: 「start を受けて動き、進捗をどこかのファイルに書く」。
-進捗ファイルの**書式は自由**で、relay は変化のたびにその中身と追跡中タスクを AI に渡し、
-「どのタスクが 完了 / 停滞 / 要判断 か」を解釈させてスレッドへ通知する。
-**決まった書式も相関タグも不要**（AI が内容でスレッドに紐付ける）。
-
-**タスクスレッドの継続**: `作業:` で始めたスレッドは、以降のやりとり（追加指示・質問）も
-自動でそのタスク宛としてマネージャーへ届く。普通モードに落ちない。
-
-**`watch_manager`（任意）**: マネージャーが「エージェントを立てるほどでない」と判断して
-端末で**直接返事**した場合、それは進捗ファイルには出ない。ON にすると relay が
-マネージャー端末の出力も同じ AI 解釈にかけ、その返事を該当スレッドへ返す。
-相手が cmux 上の対話 claude なら**プロジェクト側の改修は不要**。非同期（監視間隔ごと・数十秒遅延）。
-
-- プレースホルダ: `{task}`=依頼内容, `{id}`=スレッド識別子
-- コスト: 進捗ファイル/端末が変わるたびに解釈 LLM（安価なモデル）を1回。変化検知で無駄打ちは抑制
+- タブを手で閉じると relay は追跡を終了する（スレッドに続きを指示すれば新しいセッションで再開）
+- コスト: セッション画面が変わるたびに解釈 LLM（安価なモデル）を1回。照合・振り分けも新規タスク時に最大1回
 
 ---
 
-## 別プロジェクトで使う
-`config.yml` の `paths.target_repo` を対象プロジェクトのパスに変えるだけ。
-複数プロジェクトを同時に動かすなら、**プロジェクトごとに relay を1つ**起動する
+## リポジトリの振り分け（repos）
+
+`repos` に名前付きでリポジトリを列挙する（1つでも複数でもこの形式）:
+
+```yaml
+repos:
+  ios:
+    path: "/path/to/ios-app"
+    description: "iOSアプリ本体の開発"
+  docs:
+    path: "/path/to/dev-docs"
+    description: "開発ドキュメント・エージェント定義の管理"
+default_repo: "ios"
+```
+
+- 新規タスクの作業先は **指示にリポジトリ名の明示（「docsの〜」等） > AI 判定（description が手掛かり） > default_repo** の順
+- スレッドごとに作業先が記録され、タブを閉じて再作成するときも同じリポジトリで復元される
+- `/commit` `/push` 等の git 操作はスレッドに紐付いたセッション（＝そのリポジトリ）への指示になる
+
+これとは別に、relay 自体を分けたい場合は**設定ごとに relay を1つ**起動する
 （別々の `config.yml`。`RELAY_CONFIG=/path/to/other.yml ./.venv/bin/python app.py` で切替可能）。
 
 ---
@@ -86,30 +70,62 @@ task:
 | `security.allowed_user_ids` | 起動を許可するユーザー（本人のみ推奨。空=全員で危険） | - |
 | `security.allowed_channel_ids` | 反応する DM/チャンネル（空=全部） | 空 |
 | `security.allow_bypass` | `/mode` で yolo を選べるように | false |
-| `paths.target_repo` | 対象プロジェクト（必須） | - |
-| `paths.worktree_parent` / `workspace_dir` | worktree 親 / 普通モードの cwd（空=target_repo の親） | 親 |
-| `task.backend` | タスク実行方式（`solo` or `backends` のキー） | solo |
-| `task.solo.worktree` | solo でタスクごとに worktree を切る | true |
-| `task.backends` | 自作 backend 定義（`start` フック＋`watch` 進捗ファイル） | 無 |
-| `task.backends.<name>.watch_manager` | マネージャー端末の直接返答も AI 解釈して返す | false |
-| `behavior.manager_permission_mode` | 自作 backend マネージャーの権限（無人運用は `bypassPermissions`） | acceptEdits |
-| `behavior.task_keywords` | タスク発火語 | 作業,タスク,task |
-| `behavior.max_concurrent` | 普通モード/solo の同時実行 | 2 |
-| `behavior.default_model` / `default_permission_mode` | 起動時の既定（`/model`/`/mode` で変更可） | opus / acceptEdits |
+| `repos` | 名前付きリポジトリ一覧（`path` + `description`。必須） | - |
+| `default_repo` | `repos` のうち既定の名前 | 最初のエントリ |
+| `models.task` | タスク実装モデル（`/model` で変更可） | fable |
+| `models.match` | セッション照合・リポジトリ振り分け（誤照合は注入事故になる） | sonnet |
+| `models.interpret` | 監視ループの進捗解釈（高頻度なので安価に） | haiku |
+| `permission_mode` | タスクセッションの権限の初期値（`/mode` で変更可。無人運用は `bypassPermissions`） | acceptEdits |
+| `prompt` | セッションに注入するテンプレ（`{task}` `{id}`） | `{task}` |
 | `commands` | ユーザー定義コマンド（`/<name>`） | 無 |
+| `version_source` | `version: true` コマンドの現在バージョン取得コマンド | git describe |
 | `bin.claude` / `bin.cmux` | バイナリのパス | claude / cmux |
 | `registry_db` | 状態 DB の保存先 | ./relay_registry.sqlite3 |
+
+> 旧書式（`paths.*` / `task.*` / `behavior.*`、solo backend）は廃止。旧 config で起動すると
+> 移行案内のエラーが出る。
 
 ---
 
 ## 安全について
 - `allowed_user_ids` を本人だけに絞る（空にすると誰でもあなたの Mac を操作できる）
-- `bypassPermissions` は無人運用のための全許可。あなたのオーケストレーターの安全策と
-  worktree 隔離が歯止め。理解した上で使う
+- `permission_mode: "bypassPermissions"` は無人運用のための全許可。プロジェクト側の安全策
+  （hooks 等）が歯止め。理解した上で使う
 - `config.yml` はトークンを含むので**コミット・共有しない**（`.gitignore` 済み）
 
 ---
 
-## 補足: 自作 backend は cmux を使う
-自作 backend のマネージャーは、常駐対話セッションとして cmux（GUI ターミナル）上で動かす。
-relay が自動で cmux を起動しマネージャーのターミナルを用意する（cmux 未インストールなら solo を使う）。
+## 補足: cmux の前提
+タスクセッションは cmux（GUI ターミナル）のタブとして動かす。relay が自動で cmux を
+起動してタブを用意する（Mac がログイン画面だと GUI 起動できないためログインしておく）。
+セッションは cmux の UI からそのまま操作できる。手で開いた窓に Slack から連携することも、
+Slack で始めたタスクを途中から手で引き継ぐこともできる。
+
+---
+
+## 開発・テスト
+
+モジュール構成（1モジュール=1責務。依存はすべてコンストラクタ注入）:
+
+| モジュール | 責務 |
+|---|---|
+| `app.py` | Slack Bolt の組み立てとハンドラ登録（import 副作用なし） |
+| `relay/orchestrator.py` | composition root（依存の組み立て・スレッド単位の直列化・エラー報告） |
+| `relay/router.py` | メッセージ種別の振り分けのみ |
+| `relay/tasks.py` | タスクのライフサイクル（新規/継続/中断） |
+| `relay/commands.py` | `/model` `/mode` `/commit` `/push`・カスタムコマンド |
+| `relay/watcher.py` | セッション監視・通知（デバウンス・重複排除） |
+| `relay/match.py` / `relay/interpret.py` | 照合・振り分け / 進捗解釈（LLM 実行は注入） |
+| `relay/llm.py` | claude -p 実行の唯一の窓口 |
+| `relay/cmux.py` | cmux CLI アダプタ（runner 注入可） |
+| `relay/registry.py` / `links.py` / `settings.py` | SQLite 永続化 / スレッド紐付け / 実行時設定 |
+| `relay/gate.py` / `parsing.py` / `intent.py` | 純粋ロジック（許可判定・パース・意図判定） |
+
+テストの実行:
+
+```bash
+./.venv/bin/pip install -r requirements-dev.txt
+./.venv/bin/python -m pytest tests/ -q
+```
+
+LLM・Slack・cmux はすべて偽物を注入してテストする（実プロセスは起動しない）。
