@@ -10,7 +10,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
-from . import interpret as interpret_mod
 from . import match as match_mod
 from .commands import CommandService
 from .config import Config
@@ -61,10 +60,7 @@ class Orchestrator:
         self.router = MessageRouter(
             self.command_service, self.task_service, self.links, poster)
         self.watcher = SessionWatcher(
-            self.cmux, self.tasks_store, self.links,
-            interpreter=partial(interpret_mod.interpret,
-                                self.llm.ask_json, cfg.interpret_model),
-            poster=poster)
+            self.cmux, self.tasks_store, self.links, poster=poster)
 
         # dispatch（スレッド単位の直列化）
         self.pool = ThreadPoolExecutor(max_workers=_MAX_WORKERS)

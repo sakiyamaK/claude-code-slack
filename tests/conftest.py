@@ -29,7 +29,6 @@ def cfg(tmp_path) -> Config:
         workspace_dir=str(tmp_path),
         default_model="fable",
         match_model="sonnet",
-        interpret_model="haiku",
         task_permission_mode="acceptEdits",
         claude_bin="claude",
         cmux_bin="/nonexistent/cmux",

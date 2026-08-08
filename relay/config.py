@@ -77,7 +77,6 @@ class Config:
     workspace_dir: str         # 補助的な作業ディレクトリ（= 既定リポジトリの親）
     default_model: str         # タスク実装モデル（/model で変更可・registry に永続化）
     match_model: str           # セッション照合・リポジトリ振り分け用モデル
-    interpret_model: str       # 進捗解釈（監視ループ）用モデル。頻繁に呼ぶので安価に
     task_permission_mode: str  # タスクセッションの権限の初期値（/mode で変更可）
     claude_bin: str
     cmux_bin: str
@@ -144,7 +143,6 @@ class Config:
             default_model=str(_get(y, "models", "task", default="fable")).strip(),
             # 照合ミスは無関係なセッションへの注入事故になるので既定は sonnet
             match_model=str(_get(y, "models", "match", default="sonnet")).strip(),
-            interpret_model=str(_get(y, "models", "interpret", default="haiku")).strip(),
             task_permission_mode=str(_get(y, "permission_mode", default="acceptEdits")).strip(),
             claude_bin=str(_get(y, "bin", "claude", default="claude")).strip(),
             cmux_bin=str(_get(y, "bin", "cmux", default=_DEFAULT_CMUX)).strip(),

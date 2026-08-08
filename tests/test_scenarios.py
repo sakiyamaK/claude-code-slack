@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from relay.orchestrator import Orchestrator
-from relay.registry import STATUS_ACTIVE, STATUS_DONE
+from relay.registry import STATUS_ACTIVE
 from tests.conftest import FakeCmux, make_session
 
 
@@ -21,15 +21,12 @@ class FakeLlm:
     def __init__(self):
         self.session_pick: str | None = None   # 照合の答え
         self.repo_pick: str = "ios"            # 振り分けの答え
-        self.events: list[dict] = []           # 進捗解釈の答え
 
     def ask_json(self, prompt: str, model: str, timeout: int = 60):
         if "セッション照合器" in prompt:
             return {"surface": self.session_pick}
         if "ルーティング器" in prompt:
             return {"repo": self.repo_pick}
-        if "進捗モニター" in prompt:
-            return {"events": self.events}
         raise AssertionError(f"未知のプロンプト: {prompt[:40]}")
 
 
@@ -60,20 +57,20 @@ class TestScenarioSlackToCmux:
         assert (surface, "ログイン画面のバグを直して") in cmux.sent
         assert any("🚀" in p for p in thread_posts(posts, thread))
 
-        # ② セッションが進む → 画面変化を監視が拾い、進捗がスレッドへ
+        # ② セッションが進む → 画面が落ち着いたら本文がそのままスレッドへ
         cmux.screens[surface] = "原因を調査中… NullPointer の可能性"
-        llm.events = [{"id": thread, "kind": "progress", "summary": "原因を特定: 未初期化の変数でした"}]
-        orch.watcher.poll_once()
-        assert any("🔨 原因を特定" in p for p in thread_posts(posts, thread))
+        orch.watcher.poll_once()   # 変化を検知（出力中は送らない）
+        orch.watcher.poll_once()   # 安定 → 原文を転送
+        assert any("原因を調査中… NullPointer の可能性" in p
+                   for p in thread_posts(posts, thread))
 
-        # ③ 完了 → ✅ 通知され、タスクは done になる
-        cmux.screens[surface] = "修正完了。テストも通りました"
-        llm.events = [{"id": thread, "kind": "done", "summary": "修正してテストも通りました"}]
-        orch.watcher.poll_once()
-        assert any("✅ 修正してテストも通りました" in p for p in thread_posts(posts, thread))
-        assert orch.tasks_store.get(thread).status == STATUS_DONE
+        # ③ さらに進む → 増えた分だけが原文のまま届く
+        cmux.screens[surface] = ("原因を調査中… NullPointer の可能性\n"
+                                 "修正完了。テストも通りました")
+        orch.watcher.poll_once(); orch.watcher.poll_once()
+        assert any("修正完了。テストも通りました" in p for p in thread_posts(posts, thread))
 
-        # ④ 同じスレッドに追加指示 → 同じセッションへ届き、追跡が再開する
+        # ④ 同じスレッドに追加指示 → 同じセッションへ届く
         orch.router.route("C1", "U1", thread, "ではコミットしてください")
         assert (surface, "ではコミットしてください") in cmux.sent
         assert orch.tasks_store.get(thread).status == STATUS_ACTIVE
@@ -82,9 +79,8 @@ class TestScenarioSlackToCmux:
         # ⑤ 帰宅後、cmux のタブを直接手で操作して作業が進む
         #    → relay は関与していないのに、画面変化が同じスレッドに通知される
         cmux.screens[surface] = "$ git commit -m 'fix: login NPE' … コミットしました"
-        llm.events = [{"id": thread, "kind": "done", "summary": "コミットしました（fix: login NPE）"}]
-        orch.watcher.poll_once()
-        assert any("✅ コミットしました" in p for p in thread_posts(posts, thread))
+        orch.watcher.poll_once(); orch.watcher.poll_once()
+        assert any("コミットしました" in p for p in thread_posts(posts, thread))
 
     def test_repo_routing_to_docs(self, world, cfg, posts):
         orch, cmux, llm = world
@@ -114,12 +110,11 @@ class TestScenarioCmuxToSlack:
         assert any("🔗" in p for p in thread_posts(posts, thread))
         assert orch.links.repo_of(thread) == "ios"    # cwd から作業先を記録
 
-        # ③ セッションが答える → 監視がスレッドへ届ける
+        # ③ セッションが答える → 監視が原文をスレッドへ届ける
         cmux.screens["surface:10"] = "現状: 画面実装は完了、テスト作成中です"
-        llm.events = [{"id": thread, "kind": "progress",
-                       "summary": "画面実装は完了、テスト作成中です"}]
-        orch.watcher.poll_once()
-        assert any("🔨 画面実装は完了" in p for p in thread_posts(posts, thread))
+        orch.watcher.poll_once(); orch.watcher.poll_once()
+        assert any("現状: 画面実装は完了、テスト作成中です" in p
+                   for p in thread_posts(posts, thread))
 
     def test_second_thread_gets_own_tab(self, world, cfg):
         """合流済みセッションは占有される: 別スレッドは自分のタブを持つ。"""

@@ -1,7 +1,7 @@
 """LLM 呼び出しの唯一の窓口。
 
 claude -p をヘッドレス実行し、応答から JSON を取り出す。
-他モジュール（match / interpret）はプロンプト構築と結果解釈だけを持ち、
+他モジュール（match）はプロンプト構築と結果解釈だけを持ち、
 実行はこの ask_json（AskJson 型の callable）を注入して使う。
 """
 from __future__ import annotations

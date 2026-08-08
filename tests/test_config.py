@@ -37,7 +37,6 @@ class TestLoad:
         assert c.target_repo == c.repos["main"]
         assert c.default_model == "fable"
         assert c.match_model == "sonnet"
-        assert c.interpret_model == "haiku"
         assert c.task_permission_mode == "acceptEdits"
 
     def test_repo_string_form(self, in_tmp):

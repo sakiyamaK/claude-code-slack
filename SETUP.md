@@ -19,11 +19,11 @@ Slack スレッドと同期する（**cmux 必須**）。relay は次の順で�
 3. **スレッド ⇔ セッションの永続紐付け（1スレッド=1surface）**: 以降そのスレッドの発言
    （追加指示・質問）は同じセッションへ届き、「やめて」は ESC 割り込み＋中断指示になる。
    一度紐付いた surface は他のスレッドに取られない。relay を再起動しても紐付けは残る（SQLite）。
-4. **進捗通知**: relay が各セッションの画面を監視し（変化検知でデバウンス）、AI が内容を解釈して
+4. **進捗通知**: relay が各セッションの画面を監視し（出力が落ち着くまでデバウンス）、増えた本文をそのまま
    ✅完了 / 🚨要判断 / 🔨節目 をスレッドへ返す。**決まった書式も相関タグも不要**。
 
 - タブを手で閉じると relay は追跡を終了する（スレッドに続きを指示すれば新しいセッションで再開）
-- コスト: セッション画面が変わるたびに解釈 LLM（安価なモデル）を1回。照合・振り分けも新規タスク時に最大1回
+- コスト: 照合・振り分けの LLM 呼び出しが新規タスク時に最大1回（進捗転送は LLM を使わない）
 
 ---
 
@@ -74,7 +74,6 @@ default_repo: "ios"
 | `default_repo` | `repos` のうち既定の名前 | 最初のエントリ |
 | `models.task` | タスク実装モデル（`/model` で変更可） | fable |
 | `models.match` | セッション照合・リポジトリ振り分け（誤照合は注入事故になる） | sonnet |
-| `models.interpret` | 監視ループの進捗解釈（高頻度なので安価に） | haiku |
 | `permission_mode` | タスクセッションの権限の初期値（`/mode` で変更可。無人運用は `bypassPermissions`） | acceptEdits |
 | `prompt` | セッションに注入するテンプレ（`{task}` `{id}`） | `{task}` |
 | `commands` | ユーザー定義コマンド（`/<name>`） | 無 |
@@ -115,7 +114,7 @@ Slack で始めたタスクを途中から手で引き継ぐこともできる�
 | `relay/tasks.py` | タスクのライフサイクル（新規/継続/中断） |
 | `relay/commands.py` | `/model` `/mode` `/commit` `/push`・カスタムコマンド |
 | `relay/watcher.py` | セッション監視・通知（デバウンス・重複排除） |
-| `relay/match.py` / `relay/interpret.py` | 照合・振り分け / 進捗解釈（LLM 実行は注入） |
+| `relay/match.py` | 照合・振り分け（LLM 実行は注入） |
 | `relay/llm.py` | claude -p 実行の唯一の窓口 |
 | `relay/cmux.py` | cmux CLI アダプタ（runner 注入可） |
 | `relay/registry.py` / `links.py` / `settings.py` | SQLite 永続化 / スレッド紐付け / 実行時設定 |

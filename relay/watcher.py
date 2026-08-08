@@ -1,88 +1,106 @@
-"""セッション監視。各セッションの画面を AI 解釈し、状態変化をスレッドへ通知する。
+"""セッション監視。各セッションの画面本文をそのままスレッドへ転送する。
 
-- 画面ハッシュの変化検知でデバウンス（変わらなければ LLM を呼ばない）
-- 同一スレッドへの同じ要約の重複通知はしない
+- 画面ハッシュの変化検知でデバウンス（変わり続けている間＝出力中は送らない）
+- 画面が落ち着いたら、前回送信時との差分（新しく増えた行）をそのまま投稿する
+- 要約・AI 解釈はしない（内容の取り違えを防ぐため原文を送る）
 - タブが閉じられていたら追跡を終了する（続きの指示で再開できる旨を通知）
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import threading
 import time
-from typing import Callable
 
 from .cmux import CmuxClient
-from .interpret import InterpEvent
 from .links import ThreadLinks
 from .registry import TaskStore, STATUS_DONE
 from .tasks import Poster, active_instructed_threads, resolve_surface
 
-# 解釈: (画面内容, tasks, notified) -> イベント一覧
-Interpreter = Callable[[str, list[dict], dict[str, list[str]]], list[InterpEvent]]
+_MAX_BODY = 3500  # Slack 投稿上限対策（超えたら末尾側を優先して残す）
 
-_ICONS = {"done": "✅", "alert": "🚨", "progress": "🔨"}
+
+def new_lines(prev: list[str], cur: list[str]) -> list[str]:
+    """前回画面 prev と今回画面 cur を行単位で比較し、新しく現れた行を返す。
+
+    画面下部の入力欄・区切り線など、両方に共通する行は差分に含まれない。
+    （末尾スクロールの単純比較では入力欄が邪魔をするため difflib で対応）
+    """
+    if not prev:
+        return cur
+    out: list[str] = []
+    sm = difflib.SequenceMatcher(None, prev, cur, autojunk=False)
+    for op, _i1, _i2, j1, j2 in sm.get_opcodes():
+        if op in ("insert", "replace"):
+            out.extend(cur[j1:j2])
+    return out
 
 
 class SessionWatcher:
     def __init__(self, cmux: CmuxClient, tasks: TaskStore, links: ThreadLinks,
-                 interpreter: Interpreter, poster: Poster) -> None:
+                 poster: Poster) -> None:
         self.cmux = cmux
         self.tasks = tasks
         self.links = links
-        self.interpret = interpreter
         self.post = poster
-        self._screen_hash: dict[str, str] = {}   # surface -> 画面ハッシュ（変化検知）
-        self._notified: dict[str, list[str]] = {}  # thread -> 通知済み要約
+        self._screen_hash: dict[str, str] = {}   # surface -> 前回ポーリングの画面ハッシュ
+        self._sent_lines: dict[str, list[str]] = {}  # surface -> 前回送信時の画面（行）
+        self._alerted: dict[str, list[str]] = {}     # thread -> 通知済みアラート
 
     def poll_once(self) -> None:
-        """紐付き済みセッションの画面を読み、変化があれば AI 解釈してスレッドへ通知。"""
+        """紐付き済みセッションの画面を読み、出力が落ち着いていたら差分を転送する。"""
         if not self.cmux.is_running():
             return  # cmux 停止中は「タブが閉じられた」と誤判定しない
-        for thread_ts, instr in active_instructed_threads(self.tasks, self.links):
+        for thread_ts, _instr in active_instructed_threads(self.tasks, self.links):
             if not self.links.surface_of(thread_ts):
                 continue
             # ref 失効時はタブ名で再発見してから判定（cmux 再起動対応）
             surface = resolve_surface(self.cmux, self.links, thread_ts)
             if not surface:
-                self._notify(InterpEvent(
-                    thread_ts, "alert",
-                    "セッション（cmux のタブ）が閉じられたため追跡を終了します。"
-                    "続きはこのスレッドに指示すれば新しいセッションで再開します。"))
+                self._alert(thread_ts,
+                            "セッション（cmux のタブ）が閉じられたため追跡を終了します。"
+                            "続きはこのスレッドに指示すれば新しいセッションで再開します。")
                 self.tasks.update(thread_ts, status=STATUS_DONE)
                 continue
             if not self.cmux.surface_has_process(surface):
-                self._notify(InterpEvent(
-                    thread_ts, "alert",
-                    "セッションの claude が終了しています。"
-                    "続きをこのスレッドに指示すれば、同じタブで会話を引き継いで再開を試みます。"))
+                self._alert(thread_ts,
+                            "セッションの claude が終了しています。"
+                            "続きをこのスレッドに指示すれば、同じタブで会話を引き継いで再開を試みます。")
                 self.tasks.update(thread_ts, status=STATUS_DONE)
                 continue
             content = self.cmux.read_screen(surface, 200)
             if not content.strip():
                 continue
             h = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            if self._screen_hash.get(surface) == h:
-                continue  # 画面変化なし → LLM を呼ばない（デバウンス）
-            self._screen_hash[surface] = h
-            events = self.interpret(
-                content, [{"id": thread_ts, "task": instr}], self._notified)
-            for e in events:
-                self._notify(e)
+            if self._screen_hash.get(surface) != h:
+                # 画面が動いている（出力中）→ 落ち着くまで送らない
+                self._screen_hash[surface] = h
+                continue
+            # 画面が安定 → 前回送信分との差分を原文のまま転送
+            cur = content.splitlines()
+            # 初回は全文、以降は前回送信分との差分（新しく増えた行）を送る
+            diff = new_lines(self._sent_lines.get(surface, []), cur)
+            body = "\n".join(diff).strip()
+            if not body:
+                continue
+            self._sent_lines[surface] = cur
+            t = self.tasks.get(thread_ts)
+            if not t:
+                continue
+            if len(body) > _MAX_BODY:  # 末尾（最新の出力）を優先して残す
+                body = "…（前略）…\n" + body[-_MAX_BODY:]
+            self.post(t.channel_id, thread_ts, f"```{body}```")
 
-    def _notify(self, e: InterpEvent) -> None:
-        # 重複排除（同一スレッドで同じ要約は送らない）
-        sent = self._notified.setdefault(e.thread_ts, [])
-        if e.summary in sent:
+    def _alert(self, thread_ts: str, text: str) -> None:
+        # 同一スレッドへの同じアラートは繰り返さない
+        sent = self._alerted.setdefault(thread_ts, [])
+        if text in sent:
             return
-        sent.append(e.summary)
-        t = self.tasks.get(e.thread_ts)
+        sent.append(text)
+        t = self.tasks.get(thread_ts)
         if not t:
             return
-        if e.kind == "done":
-            self.tasks.update(e.thread_ts, status=STATUS_DONE)
-        icon = _ICONS.get(e.kind, "ℹ️")
-        # Slack の投稿上限に当たらないよう本文を切る（重複判定は全文で行う）
-        self.post(t.channel_id, e.thread_ts, f"{icon} {e.summary[:3500]}")
+        self.post(t.channel_id, thread_ts, f"🚨 {text}")
 
     def start(self, interval: int = 20) -> None:
         threading.Thread(target=self._loop, args=(interval,), daemon=True).start()
