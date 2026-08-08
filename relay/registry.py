@@ -1,7 +1,8 @@
-"""永続レジストリ（SPEC §20）。再起動から復元できるよう SQLite を使う。
+"""永続化層（SQLite）。再起動から復元できるようにする。
 
-- tasks: thread_ts をキーにタスク状態。branch ↔ thread の対応（完了通知ルーティング）
-- settings: モデル/モードのグローバル設定、最後に処理した DM ts（catch-up 用）
+- Database: 接続・スキーマ・排他ロックの管理
+- TaskStore: tasks テーブル（thread_ts をキーにタスク状態）
+- SettingsStore: settings テーブル（key-value。紐付けや実行時設定の保存先）
 """
 from __future__ import annotations
 
@@ -10,12 +11,9 @@ import threading
 import datetime
 from dataclasses import dataclass
 
-# モード
-MODE_NORMAL = "normal"
+# タスクの種別・ステータス（relay 視点）
 MODE_TASK = "task"
-
-# タスクステータス（relay視点）
-STATUS_ACTIVE = "active"      # マネージャーに渡して進行中
+STATUS_ACTIVE = "active"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 
@@ -58,37 +56,44 @@ class Task:
     updated_at: str
 
 
-class Registry:
-    def __init__(self, db_path: str) -> None:
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._lock = threading.RLock()
-        with self._lock:
-            self._conn.executescript(_SCHEMA)
-            self._conn.commit()
+class Database:
+    """SQLite 接続とスキーマの管理。Store 群はこれを共有する。"""
 
-    def _row(self, row: sqlite3.Row) -> Task:
+    def __init__(self, db_path: str) -> None:
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.RLock()
+        with self.lock:
+            self.conn.executescript(_SCHEMA)
+            self.conn.commit()
+
+
+class TaskStore:
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    @staticmethod
+    def _row(row: sqlite3.Row) -> Task:
         return Task(**{k: row[k] for k in row.keys()})
 
-    # ── tasks ──────────────────────────────────────────
     def get(self, thread_ts: str) -> Task | None:
-        with self._lock:
-            row = self._conn.execute(
+        with self._db.lock:
+            row = self._db.conn.execute(
                 "SELECT * FROM tasks WHERE thread_ts = ?", (thread_ts,)
             ).fetchone()
         return self._row(row) if row else None
 
     def get_by_branch(self, branch: str) -> Task | None:
-        with self._lock:
-            row = self._conn.execute(
+        with self._db.lock:
+            row = self._db.conn.execute(
                 "SELECT * FROM tasks WHERE branch = ? ORDER BY updated_at DESC LIMIT 1",
                 (branch,),
             ).fetchone()
         return self._row(row) if row else None
 
     def create(self, task: Task) -> None:
-        with self._lock:
-            self._conn.execute(
+        with self._db.lock:
+            self._db.conn.execute(
                 """INSERT OR REPLACE INTO tasks
                    (thread_ts, channel_id, user_id, mode, branch, session_id,
                     anchor_ts, status, created_at, updated_at)
@@ -97,39 +102,56 @@ class Registry:
                  task.branch, task.session_id, task.anchor_ts, task.status,
                  task.created_at, task.updated_at),
             )
-            self._conn.commit()
+            self._db.conn.commit()
 
     def update(self, thread_ts: str, **fields) -> None:
         if not fields:
             return
         fields["updated_at"] = now_iso()
         cols = ", ".join(f"{k} = ?" for k in fields)
-        with self._lock:
-            self._conn.execute(
+        with self._db.lock:
+            self._db.conn.execute(
                 f"UPDATE tasks SET {cols} WHERE thread_ts = ?",
                 list(fields.values()) + [thread_ts],
             )
-            self._conn.commit()
+            self._db.conn.commit()
 
-    def active_tasks(self) -> list[Task]:
-        with self._lock:
-            rows = self._conn.execute(
+    def active(self) -> list[Task]:
+        with self._db.lock:
+            rows = self._db.conn.execute(
                 "SELECT * FROM tasks WHERE status = ?", (STATUS_ACTIVE,)
             ).fetchall()
         return [self._row(r) for r in rows]
 
-    # ── settings ───────────────────────────────────────
-    def get_setting(self, key: str, default: str | None = None) -> str | None:
-        with self._lock:
-            row = self._conn.execute(
+
+class SettingsStore:
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        with self._db.lock:
+            row = self._db.conn.execute(
                 "SELECT value FROM settings WHERE key = ?", (key,)
             ).fetchone()
         return row["value"] if row else default
 
-    def set_setting(self, key: str, value: str) -> None:
-        with self._lock:
-            self._conn.execute(
+    def set(self, key: str, value: str) -> None:
+        with self._db.lock:
+            self._db.conn.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, value),
             )
-            self._conn.commit()
+            self._db.conn.commit()
+
+    def delete(self, key: str) -> None:
+        with self._db.lock:
+            self._db.conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+            self._db.conn.commit()
+
+    def with_prefix(self, prefix: str) -> dict[str, str]:
+        with self._db.lock:
+            rows = self._db.conn.execute(
+                r"SELECT key, value FROM settings WHERE key LIKE ? ESCAPE '\'",
+                (prefix.replace("%", r"\%").replace("_", r"\_") + "%",),
+            ).fetchall()
+        return {r["key"]: r["value"] for r in rows}

@@ -1,16 +1,16 @@
-"""進捗ファイルの AI 解釈。
+"""セッション画面の AI 解釈（純粋ロジック＋AskJson 注入）。
 
-外部 backend の進捗ファイル（書式自由）を、追跡中タスク一覧と一緒に claude -p へ渡し、
+タスクを実行しているセッションの端末画面を、追跡中タスクと一緒に LLM へ渡し、
 「新しく通知すべき状態変化」だけを構造化で受け取る。format 契約・相関タグは不要。
 """
 from __future__ import annotations
 
-import json
-import subprocess
 from dataclasses import dataclass
 
-_PROMPT = """あなたは進捗モニターです。以下は「進捗ファイルの内容」または
-「マネージャー（対話AI）の端末画面」のどちらかです。装飾・スピナー・入力欄・
+from .llm import AskJson
+
+_PROMPT = """あなたは進捗モニターです。以下は「タスクを実行しているセッション
+（対話AI）の端末画面」または「進捗ファイルの内容」です。装飾・スピナー・入力欄・
 過去ログが混じっていることがあるので、意味のある内容だけを読み取ってください。
 <progress>
 {content}
@@ -26,8 +26,8 @@ _PROMPT = """あなたは進捗モニターです。以下は「進捗ファイ�
 該当が無ければ空で返すのが正しい動作。
 
 各タスクについて読み取れる状態を判断し、**まだ通知していない意味のある変化だけ**を返してください。
-マネージャーが社長（ユーザー）に向けて直接述べた回答・判断・着手/完了の報告も、対象タスクに紐づく
-意味のある内容なら含めてください（端末の反響入力や自分の指示文そのものは除く）。
+セッションの AI がユーザーに向けて直接述べた回答・判断・着手/完了の報告も、対象タスクに紐づく
+意味のある内容なら含めてください（端末の反響入力や Slack から注入された指示文そのものは除く）。
 すでに通知済みの内容（下記）は繰り返さないこと:
 {notified}
 
@@ -49,19 +49,7 @@ class InterpEvent:
     summary: str
 
 
-def _extract_json(text: str) -> dict:
-    # 応答から最初の { ... } を取り出す
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        return {"events": []}
-    try:
-        return json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return {"events": []}
-
-
-def interpret(claude_bin: str, model: str, cwd: str, content: str,
+def interpret(ask: AskJson, model: str, content: str,
               tasks: list[dict], notified: dict[str, list[str]]) -> list[InterpEvent]:
     """tasks: [{id, task}], notified: {id: [既通知summary...]} → 新規イベント一覧。"""
     if not tasks:
@@ -71,19 +59,13 @@ def interpret(claude_bin: str, model: str, cwd: str, content: str,
         f"- id={tid}: {'; '.join(s)}" for tid, s in notified.items() if s
     ) or "（まだ無し）"
     prompt = _PROMPT.format(content=content[:8000], tasks=tasks_str, notified=notified_str)
-
-    cmd = [claude_bin, "-p", prompt, "--model", model,
-           "--permission-mode", "plan", "--output-format", "text"]
-    try:
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=120)
-    except Exception:
-        return []
-    data = _extract_json(proc.stdout or "")
+    data = ask(prompt, model, timeout=120) or {}
     out: list[InterpEvent] = []
     ids = {t["id"] for t in tasks}
     for e in data.get("events", []):
         tid = str(e.get("id", "")).strip()
         kind = str(e.get("kind", "")).strip()
         if tid in ids and kind in ("done", "alert", "progress"):
-            out.append(InterpEvent(thread_ts=tid, kind=kind, summary=str(e.get("summary", "")).strip()))
+            out.append(InterpEvent(thread_ts=tid, kind=kind,
+                                   summary=str(e.get("summary", "")).strip()))
     return out
