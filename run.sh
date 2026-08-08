@@ -21,6 +21,34 @@ if [ "$(id -u)" = "0" ]; then
   exit 1
 fi
 
+# 多重起動ガード: 既存の app.py が残っていると Slack のイベントがそちらに
+# 配信され、このウィンドウに何も届かなくなる（Socket Mode は接続の1つにしか配らない）。
+# 見つけたら停止してから起動する。
+APP_DIR="$(pwd)"
+OLD_PIDS=$(pgrep -f "python app\.py" | while read -r pid; do
+  if lsof -p "$pid" 2>/dev/null | grep -q "cwd.*$APP_DIR"; then echo "$pid"; fi
+done)
+if [ -n "$OLD_PIDS" ]; then
+  echo "⚠️ 既に起動中の app.py を検出しました。停止します: $OLD_PIDS"
+  for pid in $OLD_PIDS; do
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pkill -TERM -P "$pid" 2>/dev/null || true   # 子（caffeinate 配下の python）
+    kill  -TERM    "$pid" 2>/dev/null || true
+    # 対の caffeinate（親）も落とす
+    if [ -n "$ppid" ] && ps -o command= -p "$ppid" 2>/dev/null | grep -q caffeinate; then
+      kill -TERM "$ppid" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for pid in $OLD_PIDS; do
+    if kill -0 "$pid" 2>/dev/null; then
+      pkill -KILL -P "$pid" 2>/dev/null || true
+      kill  -KILL    "$pid" 2>/dev/null || true
+    fi
+  done
+  echo "✅ 古いプロセスを停止しました"
+fi
+
 CLAMSHELL_ENABLED=0
 
 restore_clamshell() {
