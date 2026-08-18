@@ -13,7 +13,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from relay.config import Config
-from relay.gate import is_allowed, strip_mentions
+from relay.gate import is_allowed, normalize_text
 from relay.orchestrator import Orchestrator
 
 
@@ -34,7 +34,7 @@ def register_handlers(app: App, cfg: Config, orch: Orchestrator) -> None:
         channel = event.get("channel", "")
         ts = event.get("ts", "")
         thread_ts = event.get("thread_ts") or ts
-        text = strip_mentions(event.get("text", ""))
+        text = normalize_text(event.get("text", ""))
         if not _allowed(user, channel):
             return
         _ack_eyes(channel, ts)
@@ -81,7 +81,7 @@ def catch_up(app: App, cfg: Config, orch: Orchestrator) -> None:
             thread_ts = m.get("thread_ts") or ts
             orch.post(ch, thread_ts, "⏰ 復帰しました。未処理の指示を処理します。")
             orch.runtime.mark_processed(ts)
-            orch.handle(ch, user, thread_ts, strip_mentions(m.get("text", "")))
+            orch.handle(ch, user, thread_ts, normalize_text(m.get("text", "")))
 
 
 def self_check(app: App) -> None:

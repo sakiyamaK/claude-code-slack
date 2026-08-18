@@ -31,7 +31,7 @@ class TestRoute:
         commands, tasks, links = parts
         commands.has_pending_pick.return_value = True
         make_router(commands, tasks, links, poster).route("C1", "U1", "1.1", " 2 ")
-        commands.apply_pick.assert_called_once_with("C1", "1.1", 2)
+        commands.apply_pick.assert_called_once_with("C1", "U1", "1.1", 2)
 
     def test_command(self, parts, poster):
         commands, tasks, links = parts
@@ -71,6 +71,49 @@ class TestRoute:
         make_router(commands, tasks, links, poster, is_operation=True) \
             .route("C1", "U1", "9.9", "止め方を調べて")
         tasks.new_task.assert_called_once()
+
+
+class TestSessionIdRouting:
+    UUID = "1A010C53-2190-4135-8EFF-AA18350D2FA0"
+
+    def test_id_attaches_then_instructs(self, parts, poster):
+        commands, tasks, links = parts
+        make_router(commands, tasks, links, poster) \
+            .route("C1", "U1", "1.1", f"workspace_id={self.UUID} 続きをやって")
+        ref = tasks.attach_session.call_args[0][3]
+        assert ref.session_id == self.UUID and ref.rest == "続きをやって"
+        tasks.follow_up.assert_called_once_with("C1", "U1", "1.1", "続きをやって")
+        tasks.new_task.assert_not_called()
+
+    def test_id_only_just_attaches(self, parts, poster):
+        commands, tasks, links = parts
+        make_router(commands, tasks, links, poster) \
+            .route("C1", "U1", "1.1", f"cmux://workspace/{self.UUID}")
+        tasks.attach_session.assert_called_once()
+        tasks.follow_up.assert_not_called()
+        tasks.new_task.assert_not_called()
+
+    def test_id_with_stop_interrupts(self, parts, poster):
+        commands, tasks, links = parts
+        make_router(commands, tasks, links, poster, is_operation=True) \
+            .route("C1", "U1", "1.1", f"workspace_id={self.UUID} やめて")
+        tasks.operation.assert_called_once_with("C1", "1.1", "やめて")
+
+    def test_failed_explicit_attach_does_not_instruct(self, parts, poster):
+        commands, tasks, links = parts
+        tasks.attach_session.return_value = False           # ID のタブが無かった
+        make_router(commands, tasks, links, poster) \
+            .route("C1", "U1", "1.1", f"workspace_id={self.UUID} 続きをやって")
+        tasks.follow_up.assert_not_called()
+        tasks.new_task.assert_not_called()                  # 勝手に新規タブは作らない
+
+    def test_bare_uuid_without_tab_is_normal_task(self, parts, poster):
+        """目印の無い UUID は指示文の一部かもしれない → 該当タブが無ければ通常処理。"""
+        commands, tasks, links = parts
+        tasks.attach_session.return_value = False
+        text = f"{self.UUID} のレコードを消して"
+        make_router(commands, tasks, links, poster).route("C1", "U1", "1.1", text)
+        tasks.new_task.assert_called_once_with("C1", "U1", "1.1", text)
 
 
 class TestPickerCancel:

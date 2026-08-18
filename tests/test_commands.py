@@ -27,7 +27,7 @@ class TestPicker:
         svc.handle("C1", "U1", "111.1", "model", "")
         assert svc.has_pending_pick("111.1")
         assert "Fable 5" in posts[-1][2]
-        svc.apply_pick("C1", "111.1", 2)                 # Opus 4.8
+        svc.apply_pick("C1", "U1", "111.1", 2)                 # Opus 4.8
         assert runtime.model == "opus"
         assert not svc.has_pending_pick("111.1")
 
@@ -45,7 +45,46 @@ class TestPicker:
     def test_out_of_range(self, build, posts):
         svc = build(FakeCmux())
         svc.handle("C1", "U1", "111.1", "model", "")
-        svc.apply_pick("C1", "111.1", 99)
+        svc.apply_pick("C1", "U1", "111.1", 99)
+        assert "範囲外" in posts[-1][2]
+
+
+class TestSessionsPicker:
+    """/sessions: 動いているセッションを番号で選んで合流（ID を知らなくてよい）。"""
+
+    WS = "1A010C53-2190-4135-8EFF-AA18350D2FA0"
+
+    def test_lists_and_attaches_by_number(self, build, cfg, links, posts):
+        cmux = FakeCmux([
+            make_session(surface="surface:10", name="レビュー", workspace_id=self.WS,
+                         cwd=cfg.repos["ios"], screen="⏺ PR のレビューを書いています。"),
+        ])
+        svc = build(cmux)
+        svc.handle("C1", "U1", "111.1", "sessions", "")
+        assert "1 レビュー" in posts[-1][2]
+        assert "PR のレビューを書いています" in posts[-1][2]   # 画面の要旨で見分けられる
+        assert svc.has_pending_pick("111.1")
+
+        svc.apply_pick("C1", "U1", "111.1", 1)
+        assert links.surface_of("111.1") == "surface:10"
+        assert links.workspace_of("111.1") == self.WS
+        assert cmux.created == []                        # 新規タブは作らない
+
+    def test_marks_sessions_owned_by_other_threads(self, build, cfg, links, posts):
+        cmux = FakeCmux([make_session(surface="surface:10", workspace_id=self.WS)])
+        links.link_surface("999.9", "surface:10")
+        build(cmux).handle("C1", "U1", "111.1", "sessions", "")
+        assert "別スレッドが窓口" in posts[-1][2]
+
+    def test_no_sessions(self, build, posts):
+        build(FakeCmux()).handle("C1", "U1", "111.1", "sessions", "")
+        assert "動いているセッションはありません" in posts[-1][2]
+
+    def test_out_of_range_number(self, build, posts):
+        cmux = FakeCmux([make_session(workspace_id=self.WS)])
+        svc = build(cmux)
+        svc.handle("C1", "U1", "111.1", "sessions", "")
+        svc.apply_pick("C1", "U1", "111.1", 9)
         assert "範囲外" in posts[-1][2]
 
 

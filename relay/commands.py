@@ -1,6 +1,7 @@
-"""コマンド処理（/model /mode /commit /push＋config 定義のカスタムコマンド）。
+"""コマンド処理（/model /mode /sessions /commit /push＋config 定義のカスタムコマンド）。
 
 /model /mode は番号ピッカーで RuntimeSettings を更新する。
+/sessions は動いている cmux セッションを番号で選んで合流する（ID を知らなくてよい）。
 カスタムコマンドはスレッドのセッションへ指示を注入する（未紐付けならタブを作る）。
 """
 from __future__ import annotations
@@ -10,9 +11,10 @@ import re
 from typing import Callable
 
 from .config import Config
-from .cmux import CmuxClient
+from .cmux import CmuxClient, Session
 from .links import ThreadLinks
-from .parsing import format_template, parse_version_spec
+from .match import screen_digest
+from .parsing import SessionRef, format_template, parse_version_spec
 from .registry import TaskStore, MODE_TASK
 from .settings import RuntimeSettings
 from .tasks import TaskService, Poster, active_instructed_threads
@@ -47,7 +49,8 @@ class CommandService:
         self.runtime = runtime
         self.post = poster
         self._shell = shell_runner or _default_shell_runner
-        self._pending: dict[str, str] = {}  # thread_ts -> "model" | "mode"
+        self._pending: dict[str, str] = {}  # thread_ts -> "model" | "mode" | "session"
+        self._pending_sessions: dict[str, list[Session]] = {}  # session ピッカーの候補
 
     # ── 入口 ────────────────────────────────────────────
     def handle(self, channel: str, user: str, thread_ts: str, name: str, arg: str) -> None:
@@ -56,6 +59,8 @@ class CommandService:
                 self._set_direct(channel, thread_ts, name, arg.strip())
             else:
                 self._show_picker(channel, thread_ts, name)
+        elif name == "sessions":
+            self._show_sessions(channel, thread_ts)
         elif name in ("commit", "push"):
             self._git_command(channel, thread_ts, name)
         elif name == "status":
@@ -101,6 +106,7 @@ class CommandService:
     def cancel_pick(self, thread_ts: str) -> None:
         """番号以外の発言が来たらピッカーを破棄する（あとから数字を送っても誤発動しない）。"""
         self._pending.pop(thread_ts, None)
+        self._pending_sessions.pop(thread_ts, None)
 
     def _choices(self, kind: str) -> list[tuple[str, str]]:
         if kind == "model":
@@ -119,8 +125,49 @@ class CommandService:
         self._pending[thread_ts] = kind
         self.post(channel, thread_ts, "\n".join(lines))
 
-    def apply_pick(self, channel: str, thread_ts: str, num: int) -> None:
+    # ── /sessions（動いているセッションを番号で選んで合流） ──
+    _DIGEST_LEN = 110
+
+    def _candidates(self) -> list[Session]:
+        """合流先になり得るセッション（relay 自身のタブと非エージェントは除く）。"""
+        own = self.cmux.own_surface()
+        return [s for s in self.cmux.list_sessions(with_screens=True)
+                if s.agent and s.surface != own]
+
+    def _show_sessions(self, channel: str, thread_ts: str) -> None:
+        self.cmux.ensure_running()
+        sessions = self._candidates()
+        if not sessions:
+            self.post(channel, thread_ts, "いま cmux で動いているセッションはありません。")
+            return
+        taken = self.links.linked_surfaces(exclude=thread_ts)
+        lines = ["いま動いているセッション（番号を返信すると、このスレッドがその窓口になります）:"]
+        for i, s in enumerate(sessions, 1):
+            mark = "（別スレッドが窓口）" if s.surface in taken else ""
+            lines.append(f" {i} {s.name or s.title}{mark}")
+            digest = screen_digest(s.screen, self._DIGEST_LEN)
+            if digest:
+                lines.append(f"    {digest}")
+        self._pending[thread_ts] = "session"
+        self._pending_sessions[thread_ts] = sessions
+        self.post(channel, thread_ts, "\n".join(lines))
+
+    def _apply_session_pick(self, channel: str, user: str,
+                            thread_ts: str, num: int) -> None:
+        sessions = self._pending_sessions.pop(thread_ts, [])
+        if not (1 <= num <= len(sessions)):
+            self.post(channel, thread_ts, "範囲外の番号です。もう一度 /sessions を打ってください。")
+            return
+        picked = sessions[num - 1]
+        # ID 指名と同じ経路に流す（UUID で記録され、cmux 再起動後も追従する）
+        self.tasks.attach_session(channel, user, thread_ts, SessionRef(
+            session_id=picked.workspace_id or picked.workspace, explicit=True))
+
+    def apply_pick(self, channel: str, user: str, thread_ts: str, num: int) -> None:
         kind = self._pending.pop(thread_ts)
+        if kind == "session":
+            self._apply_session_pick(channel, user, thread_ts, num)
+            return
         opts = self._choices(kind)
         if not (1 <= num <= len(opts)):
             self.post(channel, thread_ts, "範囲外の番号です。もう一度コマンドを打ってください。")
@@ -142,6 +189,9 @@ class CommandService:
             lines = ["このスレッドの紐付け:"]
             lines.append(f"- セッション: {surface}"
                          f"（タブ名: {self.links.tab_name_of(thread_ts) or '不明'}）")
+            workspace = self.links.workspace_of(thread_ts)
+            if workspace:
+                lines.append(f"- ワークスペースID: {workspace}")
             repo = self.links.repo_of(thread_ts)
             if repo:
                 lines.append(f"- 作業先: {repo}（{self.cfg.repos.get(repo, '?')}）")

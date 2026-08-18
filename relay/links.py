@@ -1,7 +1,7 @@
 """スレッド ⇔ セッションの紐付け管理。
 
-thread_ts をキーに surface（cmux セッション）・作業先リポジトリ・依頼内容を
-SettingsStore へ永続化する。キーの書式はこのモジュールだけが知る。
+thread_ts をキーに surface（cmux セッション）・workspace UUID・作業先リポジトリ・
+依頼内容を SettingsStore へ永続化する。キーの書式はこのモジュールだけが知る。
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ _SURFACE = "surface:"
 _REPO = "repo:"
 _INSTR = "instr:"
 _TAB = "tab:"
+_WS = "ws:"
 
 
 class ThreadLinks:
@@ -28,6 +29,13 @@ class ThreadLinks:
         """紐付けを外す（surface は再び照合候補に戻る）。"""
         self._s.delete(_SURFACE + thread_ts)
         self._s.delete(_TAB + thread_ts)
+        self._s.delete(_WS + thread_ts)
+
+    def threads_for_surface(self, surface: str, exclude: str | None = None) -> list[str]:
+        """その surface に紐付いているスレッド（1セッション=1窓口を保つのに使う）。"""
+        return [key[len(_SURFACE):]
+                for key, ref in self._s.with_prefix(_SURFACE).items()
+                if ref == surface and key[len(_SURFACE):] != (exclude or "")]
 
     def linked_surfaces(self, exclude: str | None = None) -> set[str]:
         """いずれかのスレッドに紐付き済みの surface（照合候補から除外する）。
@@ -47,6 +55,13 @@ class ThreadLinks:
 
     def set_tab_name(self, thread_ts: str, name: str) -> None:
         self._s.set(_TAB + thread_ts, name)
+
+    # ── workspace UUID（ID 指名で合流したスレッドの再解決に使う。UUID は不変） ──
+    def workspace_of(self, thread_ts: str) -> str | None:
+        return self._s.get(_WS + thread_ts)
+
+    def set_workspace(self, thread_ts: str, workspace_id: str) -> None:
+        self._s.set(_WS + thread_ts, workspace_id)
 
     # ── 作業先リポジトリ ─────────────────────────────────
     def repo_of(self, thread_ts: str) -> str | None:

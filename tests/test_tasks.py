@@ -1,6 +1,9 @@
 """TaskService のテスト（1スレッド=1surface の仕様を回帰テスト化）。"""
+from dataclasses import replace
+
 import pytest
 
+from relay.parsing import parse_session_ref
 from relay.registry import STATUS_ACTIVE, STATUS_DONE
 from relay.tasks import TaskService
 from relay.match import find_ticket
@@ -75,11 +78,98 @@ class TestNewTask:
         svc2.new_task("C1", "U1", "111.1", "何かやって")
         assert "surface:10" not in (seen.get("candidates") or [])
 
+    def test_own_tab_excluded_from_candidates(self, service_factory, cfg):
+        """relay 自身のタブは候補外（受信ログに指示文が写るため誤照合しやすい）。"""
+        cmux = FakeCmux([make_session(surface="surface:10", cwd=cfg.repos["ios"])])
+        cmux.own = "surface:10"
+        seen = {}
+        def pick(body, cands):
+            seen["candidates"] = [s.surface for s in cands]
+            return None
+        service_factory(cmux, pick_session=pick).new_task("C1", "U1", "111.1", "何かやって")
+        assert seen["candidates"] == []
+
+    def test_non_agent_surface_excluded_from_candidates(self, service_factory, cfg):
+        """素のシェルやエディタのサーフェスに指示を打ち込まない。"""
+        cmux = FakeCmux([
+            make_session(surface="surface:10", cwd=cfg.repos["ios"]),
+            make_session(surface="surface:19", name="メモ", cwd=None),
+        ])
+        cmux.sessions[1] = replace(cmux.sessions[1], agent=False)
+        seen = {}
+        def pick(body, cands):
+            seen["candidates"] = [s.surface for s in cands]
+            return None
+        service_factory(cmux, pick_session=pick).new_task("C1", "U1", "111.1", "何かやって")
+        assert seen["candidates"] == ["surface:10"]
+
     def test_task_name_prefers_ticket(self, service_factory):
         cmux = FakeCmux()
         svc = service_factory(cmux)
         svc.new_task("C1", "U1", "111.1", "NAPP-22262 のバグを直して")
         assert cmux.created[0][0] == "NAPP-22262"
+
+
+class TestAttachSession:
+    """Slack にワークスペースIDを貼っての合流（新規タブを作らない）。"""
+
+    WS = "1A010C53-2190-4135-8EFF-AA18350D2FA0"
+
+    def _cmux(self, cfg):
+        return FakeCmux([make_session(cwd=cfg.repos["ios"], workspace_id=self.WS)])
+
+    def test_attaches_named_tab(self, service_factory, cfg, links, task_store, posts):
+        cmux = self._cmux(cfg)
+        svc = service_factory(cmux)
+        assert svc.attach_session("C1", "U1", "111.1", parse_session_ref(
+            f"workspace_id={self.WS} テストも直して"))
+        assert cmux.created == []                          # 新しいタブは作らない
+        assert links.surface_of("111.1") == "surface:10"
+        assert links.workspace_of("111.1") == self.WS       # UUID で再解決できるよう記録
+        assert links.repo_of("111.1") == "ios"             # cwd から逆引き
+        assert links.instruction_of("111.1") == "テストも直して"
+        assert task_store.get("111.1").status == STATUS_ACTIVE
+        assert any("🔗" in p[2] for p in posts)
+        assert cmux.sent == []                             # 指示の投入は router 経由
+
+    def test_id_only_records_instruction_for_tracking(self, service_factory, cfg, links):
+        cmux = self._cmux(cfg)
+        svc = service_factory(cmux)
+        svc.attach_session("C1", "U1", "111.1",
+                           parse_session_ref(f"cmux://workspace/{self.WS}"))
+        assert links.surface_of("111.1") == "surface:10"
+        assert links.instruction_of("111.1")               # 監視対象になるよう記録は残す
+
+    def test_unknown_id_guides_without_creating_tab(self, service_factory, links, posts):
+        cmux = FakeCmux()
+        svc = service_factory(cmux)
+        assert not svc.attach_session("C1", "U1", "111.1",
+                                      parse_session_ref(f"workspace_id={self.WS}"))
+        assert cmux.created == [] and links.surface_of("111.1") is None
+        assert any("見つかりません" in p[2] for p in posts)
+
+    def test_takes_over_from_other_thread(self, service_factory, cfg, links, posts):
+        cmux = self._cmux(cfg)
+        svc = service_factory(cmux)
+        links.link_surface("999.9", "surface:10")           # 別スレッドが窓口だった
+        svc.attach_session("C1", "U1", "111.1",
+                           parse_session_ref(f"workspace_id={self.WS}"))
+        assert links.surface_of("111.1") == "surface:10"
+        assert links.surface_of("999.9") is None           # 二重通知にならないよう解除
+        assert any("別スレッドの紐付けは解除" in p[2] for p in posts)
+
+    def test_rebinds_by_uuid_after_ref_change(self, service_factory, cfg, links):
+        """cmux 再起動で ref が変わっても UUID から引き直す。"""
+        cmux = self._cmux(cfg)
+        svc = service_factory(cmux)
+        svc.attach_session("C1", "U1", "111.1",
+                           parse_session_ref(f"workspace_id={self.WS}"))
+        cmux.sessions[:] = [make_session(surface="surface:77", workspace="workspace:77",
+                                        cwd=cfg.repos["ios"], workspace_id=self.WS)]
+        svc.follow_up("C1", "U1", "111.1", "続きをやって")
+        assert links.surface_of("111.1") == "surface:77"
+        assert ("surface:77", "続きをやって") in cmux.sent
+        assert cmux.created == []
 
 
 class TestFollowUp:

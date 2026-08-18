@@ -116,6 +116,30 @@ class TestScenarioCmuxToSlack:
         assert any("現状: 画面実装は完了、テスト作成中です" in p
                    for p in thread_posts(posts, thread))
 
+    def test_workspace_id_attaches_that_tab(self, world, cfg, posts):
+        """ワークスペースIDを貼っての合流（照合を通さず名指し）。"""
+        orch, cmux, llm = world
+        ws = "1A010C53-2190-4135-8EFF-AA18350D2FA0"
+        thread = "500.1"
+        # cmux で手動で始めた作業（タブ名からは何の作業か分からない）
+        cmux.sessions.append(make_session(
+            surface="surface:10", name="zsh", title="zsh",
+            cwd=cfg.repos["ios"], workspace_id=ws))
+        llm.session_pick = None   # 照合では拾えない状況
+
+        orch.router.route("C1", "U1", thread, f"workspace_id={ws} テストも直して")
+        assert orch.links.surface_of(thread) == "surface:10"
+        assert orch.links.workspace_of(thread) == ws
+        assert cmux.created == []                          # 新規タブは作らない
+        assert ("surface:10", "テストも直して") in cmux.sent
+
+        # 以降このスレッドが窓口: 続きの発言も同じタブへ、進捗も届く
+        orch.router.route("C1", "U1", thread, "ありがとう、続けて")
+        assert ("surface:10", "ありがとう、続けて") in cmux.sent
+        cmux.screens["surface:10"] = "テストを追加しました"
+        orch.watcher.poll_once(); orch.watcher.poll_once()
+        assert any("テストを追加しました" in p for p in thread_posts(posts, thread))
+
     def test_second_thread_gets_own_tab(self, world, cfg):
         """合流済みセッションは占有される: 別スレッドは自分のタブを持つ。"""
         orch, cmux, llm = world

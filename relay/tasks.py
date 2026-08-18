@@ -13,7 +13,7 @@ from typing import Callable, Protocol
 from .cmux import CmuxClient, Session
 from .config import Config
 from .links import ThreadLinks
-from .parsing import format_template
+from .parsing import SessionRef, format_template
 from .registry import (
     Task, TaskStore, MODE_TASK, STATUS_ACTIVE, now_iso,
 )
@@ -59,10 +59,21 @@ def resolve_surface(cmux: CmuxClient, links: ThreadLinks, thread_ts: str) -> str
     surface ref は cmux 再起動で振り直される借り物の番号。同じ ref が別のタブを
     指すことがあるため、relay が命名したタブ（tab_name 記録あり）は名前で本人確認し、
     別物なら正しいタブを名前で探し直して紐付けを張り直す。
-    タブ名の記録が無い紐付け（手動セッションへの合流）は ref の存在確認のみ。
+    ID 指名で合流したスレッド（workspace UUID 記録あり）は UUID から引き直す。
+    どちらの記録も無い紐付け（自動照合での合流）は ref の存在確認のみ。
     """
     surface = links.surface_of(thread_ts)
     if not surface:
+        return None
+    workspace = links.workspace_of(thread_ts)
+    if workspace:
+        # UUID は cmux 再起動をまたいで不変。そこから今の ref を引き直す
+        refs = cmux.workspace_surfaces(workspace)
+        if surface in refs:
+            return surface
+        if refs:
+            links.link_surface(thread_ts, refs[0])
+            return refs[0]
         return None
     tab = links.tab_name_of(thread_ts)
     names = cmux.surface_names()
@@ -102,9 +113,12 @@ class TaskService:
         self.ensure_row(channel, user, thread_ts)
         self.cmux.ensure_running()
         prompt = format_template(self.cfg.cmux_prompt, {"task": body, "id": thread_ts})
-        # 既存セッションとの照合（他スレッドに紐付き済みのものは候補から外す）
+        # 既存セッションとの照合（他スレッドに紐付き済み・relay 自身のタブは候補外）
+        # 画面も読む: いま何の話をしているかが照合の一番強い手掛かりになる
         taken = self.links.linked_surfaces(exclude=thread_ts)
-        candidates = [s for s in self.cmux.list_sessions() if s.surface not in taken]
+        taken.add(self.cmux.own_surface() or "")
+        candidates = [s for s in self.cmux.list_sessions(with_screens=True)
+                      if s.surface not in taken and s.agent]
         picked_ref = self._pick_session(body, candidates)
         if picked_ref:
             picked = next(s for s in candidates if s.surface == picked_ref)
@@ -129,6 +143,51 @@ class TaskService:
         self.cmux.send(surface, prompt)
         self.post(channel, thread_ts,
                   "タブを作成しました（cmux の UI からも確認できます）。進捗はこのスレッドに通知します。")
+
+    # ── ID 指名での合流 ──────────────────────────────────
+    def attach_session(self, channel: str, user: str, thread_ts: str,
+                       ref: SessionRef) -> bool:
+        """cmux の workspace_id / surface_id を貼られたら、そのタブを窓口にする。
+
+        すでに cmux で進めている作業に Slack から合流するための入口。
+        照合（AI 判定）を通さず名指しするので、新しいタブは作らない。
+        紐付けだけを行い、添えられた指示の扱いは呼び側（router）に任せる。
+        紐付けできなければ False（呼び側が通常処理に回すか案内するかを決める）。
+        """
+        self.cmux.ensure_running()
+        session = (self.cmux.find_surface(ref.session_id) if ref.is_surface
+                   else self.cmux.workspace_session(ref.session_id))
+        if session is None:
+            # workspace_id / surface_id の取り違えを救う（どちらも `identify` に並ぶ）
+            session = (self.cmux.workspace_session(ref.session_id) if ref.is_surface
+                       else self.cmux.find_surface(ref.session_id))
+        if session is None:
+            if ref.explicit:  # 目印付きの指名だけ案内する（裸の UUID は指示文の一部かもしれない）
+                self.post(channel, thread_ts,
+                          f"⚠️ ID `{ref.session_id}` のセッションが cmux に見つかりません。"
+                          "合流したいタブで `cmux identify --id-format both` を実行し、"
+                          "`workspace_id` の値を貼ってください。")
+            return False
+        self.ensure_row(channel, user, thread_ts)
+        # 1セッション=1窓口。同じタブを見ていた別スレッドの紐付けは外す（二重通知を防ぐ）
+        stolen = self.links.threads_for_surface(session.surface, exclude=thread_ts)
+        for other in stolen:
+            self.links.unlink_surface(other)
+        self.links.unlink_surface(thread_ts)  # 別タブに紐付いていた場合の付け替え
+        self.links.link_surface(thread_ts, session.surface)
+        self.links.set_workspace(thread_ts, session.workspace_id or session.workspace)
+        self._record_repo_from_cwd(thread_ts, session.cwd)
+        label = session.name or session.title or session.surface
+        if ref.rest:
+            self.links.set_instruction(thread_ts, ref.rest)
+        elif not self.links.instruction_of(thread_ts):
+            # 監視ループは依頼内容のあるスレッドだけ追跡するため、最低限の記録を残す
+            self.links.set_instruction(thread_ts, f"cmux セッション「{label}」への合流")
+        note = "（このタブを見ていた別スレッドの紐付けは解除しました）" if stolen else ""
+        self.post(channel, thread_ts,
+                  f"🔗 cmux のセッション「{label}」に接続しました{note}。"
+                  "以降このスレッドがそのセッションの窓口になります（進捗もここに届きます）。")
+        return True
 
     # ── 継続指示 ────────────────────────────────────────
     def follow_up(self, channel: str, user: str, thread_ts: str, text: str) -> None:

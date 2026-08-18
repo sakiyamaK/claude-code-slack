@@ -4,10 +4,14 @@ from __future__ import annotations
 import re
 
 _MENTION_RE = re.compile(r"<@[^>]+>")
+# Slack は URL を <url> / <url|表示名> に包んで送ってくる（cmux://… も対象）
+_LINK_RE = re.compile(r"<([a-z][a-z0-9+.\-]*:[^|>]+)(?:\|[^>]*)?>", re.I)
 
 
-def strip_mentions(text: str) -> str:
-    return _MENTION_RE.sub("", text or "").strip()
+def normalize_text(text: str) -> str:
+    """メンションを除き、Slack が包んだリンクを素の URL に戻す。"""
+    stripped = _MENTION_RE.sub("", text or "")
+    return _LINK_RE.sub(lambda m: m.group(1), stripped).strip()
 
 
 def is_allowed(user_id: str, channel_id: str,

@@ -1,6 +1,8 @@
 """共有フィクスチャ。Config は load() を通さず直接組み立てる（純粋データ）。"""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from relay.config import Config
@@ -89,6 +91,7 @@ class FakeCmux:
         self.dead_claude: set[str] = set()             # claude が終了している surface
         self.revive_ok = True                          # revive_session が成功するか
         self.revived: list[str] = []
+        self.own: str | None = None                    # relay 自身のタブ（照合の候補外）
         self._next_surface = 100
 
     def ensure_running(self):
@@ -97,11 +100,31 @@ class FakeCmux:
     def is_running(self):
         return self.running
 
-    def list_sessions(self):
-        return list(self.sessions)
+    def list_sessions(self, with_screens=False):
+        if not with_screens:
+            return list(self.sessions)
+        # screens に登録があればそれを、無ければ Session 自身が持つ画面を使う
+        return [replace(s, screen=self.screens.get(s.surface, s.screen))
+                for s in self.sessions]
 
     def surface_exists(self, surface):
         return any(s.surface == surface for s in self.sessions)
+
+    def own_surface(self):
+        return self.own
+
+    def workspace_session(self, workspace):
+        for s in self.sessions:
+            if workspace in (s.workspace_id, s.workspace):
+                return s
+        return None
+
+    def find_surface(self, surface_id):
+        return None
+
+    def workspace_surfaces(self, workspace):
+        return [s.surface for s in self.sessions
+                if workspace in (s.workspace_id, s.workspace)]
 
     def new_session(self, name, cwd, claude_bin, model, permission_mode):
         self._next_surface += 1
@@ -139,5 +162,7 @@ def fake_cmux() -> FakeCmux:
 
 
 def make_session(surface="surface:10", name="A機能の実装", title="A機能の実装中",
-                 cwd="/tmp", workspace="workspace:9") -> Session:
-    return Session(surface=surface, workspace=workspace, name=name, title=title, cwd=cwd)
+                 cwd="/tmp", workspace="workspace:9", workspace_id="",
+                 screen="") -> Session:
+    return Session(surface=surface, workspace=workspace, name=name, title=title,
+                   cwd=cwd, workspace_id=workspace_id, screen=screen)
